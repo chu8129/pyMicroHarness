@@ -1,0 +1,94 @@
+# Reasonix 主配置文件
+# 加载优先级: flag > ./config.yaml > ~/.reasonix/config.yaml > 内置默认值
+
+# LLM 提供商配置 (OpenAI-compatible)
+providers:
+  - name: bedrock
+    kind: openai
+    base_url: http://50.16.28.220:4000
+    model: us.anthropic.claude-sonnet-4-6
+    api_key_env: BEDROCK_API_KEY
+    context_window: 200000
+    request_timeout: 120
+
+  - name: kimi
+    kind: openai
+    base_url: https://api.moonshot.cn/v1
+    model: kimi-k2.6
+    api_key_env: KIMI_API_KEY
+    context_window: 8192
+    request_timeout: 120
+
+  - name: bai
+    kind: openai
+    base_url: https://chat.bankofai.io/v1
+    model: minimax-m3
+    api_key_env: BAI_API_KEY
+    context_window: 32678
+    request_timeout: 120
+
+# Agent 行为配置
+agent:
+  # system_prompt 支持两种写法:
+  #   1. 直接内联文本 (如下)
+  #   2. 引用外部文件: system_prompt: "file:my_prompt.md"
+  #      路径相对于本配置文件所在目录 (也可用绝对路径)
+  system_prompt: |
+    You are Reasonix, a coding agent focused on executing code tasks.
+    Use the provided tools to read and write files and run shell commands.
+    Principles: understand the request before acting; verify with tools instead of
+    guessing; keep changes minimal and correct; briefly summarize what you did.
+    When the request leaves a real choice to the user — which approach or library,
+    the scope, or a consequential or ambiguous decision — call the ask tool to offer
+    2-4 concrete options rather than guessing or burying the question in prose. Skip
+    it when there's an obvious default; don't ask just to confirm. Approval-bypass
+    modes do not answer ask questions or approve plans for the user. If no
+    interactive user is available, the ask tool returns a model-assumption fallback;
+    state the assumption you made before proceeding.
+    For multi-step work, track progress with the todo_write tool: lay out the steps,
+    keep exactly one in_progress, and flip each to completed as you finish it — update
+    the list as you go, not just at the end.
+    In plan mode the harness blocks writer tools: do read-only research, then write a
+    concise plan as your reply and stop. The user is asked to approve before anything
+    is changed; once approved, work through the steps, updating the task list as you go.
+  language_policy: |
+    Reply in the same language the user is using in their most recent message:
+    if they write in Chinese answer in Chinese, in English answer in English,
+    and switch whenever they switch. Let this also guide the language you think in.
+    Always keep code, identifiers, file paths, shell commands, and technical terms
+    in their original form — never translate them.
+  max_steps: 0                         # 最大执行步数 (0=无限制)
+  planner_max_steps: 12                # Planner 最大步数
+  temperature: 1.0                     # LLM 温度
+  auto_plan: false                     # 自动规划: true | false
+  reasoning_language: auto             # 推理语言: auto | en | zh
+  planner_model: ""                    # 专用规划模型
+  subagent_model: ""                   # 子代理模型
+  subagent_models: {}                  # 按技能指定模型
+  output_style: ""                     # 输出风格
+  soft_compact_ratio: 0.5              # 软压缩阈值
+  compact_ratio: 0.8                   # 压缩阈值
+  compact_force_ratio: 0.9             # 强制压缩阈值
+
+tools:
+  enabled: []                          # 启用的工具 (空=全部)
+  # enabled: [read_file, bash, grep, web_fetch]
+  shell:
+    prefer: auto                       # auto | bash | sh
+    path: ""                           # 自定义 shell 路径
+  bash_timeout_seconds: 120            # Bash 命令超时(秒)
+
+skills:
+  enabled: []                          # 启用的技能 (空=全部)
+  # enabled: [explore, research]
+
+permissions:
+  allow_write: true                    # 允许文件写入
+  allow_bash: true                     # 允许执行 shell
+  allow_web_fetch: true                # 允许网络请求
+  auto_approve: false                    # 自动批准所有操作
+
+sandbox:
+  enabled: false                       # 启用沙箱
+  allowed_paths: []                    # 允许访问的路径
+  blocked_paths: []                    # 禁止访问的路径

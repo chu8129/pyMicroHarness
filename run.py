@@ -19,9 +19,12 @@ def _load_dotenv(env_file: str = ".env") -> None:
     """从 .env 文件补充环境变量（不覆盖已有的系统环境变量）。"""
     try:
         from dotenv import load_dotenv
+
         load_dotenv(env_file, override=False)
     except ImportError:
         pass  # python-dotenv 未安装时静默跳过
+
+
 import glob
 import subprocess
 import readline
@@ -716,8 +719,13 @@ class Provider:
         self.api_key = os.environ.get(entry.api_key_env, "") or entry.api_key_env
 
     def chat(self, messages: List[dict], tools: List[dict], temperature: float = 0.0) -> dict:
-        from retrying import retry
+        """发送请求到 LLM。在子线程中执行阻塞的 HTTP 调用，主线程轮询 future
+        以便 Ctrl+C（KeyboardInterrupt）能即时响应并取消请求。"""
         import urllib.request
+        import urllib.error
+        import concurrent.futures
+        import threading
+        import time
 
         payload = {"model": self.entry.model, "messages": messages, "temperature": temperature}
         if tools:
@@ -727,28 +735,66 @@ class Provider:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
         url = f"{self.entry.base_url.rstrip('/')}/chat/completions"
 
-        @retry(stop_max_attempt_number=3, wait_fixed=1000)
-        def _call():
+        # 用于通知子线程停止重试的标志
+        _cancel = threading.Event()
+
+        def _call_once():
+            """单次 HTTP 请求（在子线程中运行）。"""
             req = urllib.request.Request(url, data=data, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=self.entry.request_timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
 
+        def _call_with_retry():
+            """最多重试 3 次，遇到取消信号立即退出。"""
+            last_exc: Optional[Exception] = None
+            for attempt in range(3):
+                if _cancel.is_set():
+                    raise InterruptedError("Request cancelled by user.")
+                try:
+                    return _call_once()
+                except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+                    last_exc = e
+                    if _cancel.is_set():
+                        raise InterruptedError("Request cancelled by user.")
+                    if attempt < 2:
+                        # 分段 sleep，每 0.2 s 检查一次取消标志
+                        for _ in range(5):
+                            if _cancel.is_set():
+                                raise InterruptedError("Request cancelled by user.")
+                            time.sleep(0.2)
+            raise last_exc  # type: ignore[misc]
+
+        # 在独立线程池中执行，主线程以短超时轮询以响应 Ctrl+C
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(_call_with_retry)
         try:
-            result = _call()
+            while True:
+                try:
+                    result = future.result(timeout=0.2)
+                    break
+                except concurrent.futures.TimeoutError:
+                    continue  # 继续等待，让信号处理器有机会运行
+        except KeyboardInterrupt:
+            _cancel.set()  # 通知子线程停止重试
+            executor.shutdown(wait=False)
+            raise  # 向上传播，由 Controller / CLI 层处理
+        finally:
+            executor.shutdown(wait=False)
+
+        # 解析正常响应
+        try:
             choice = result["choices"][0]
             msg = choice["message"]
             return {"content": msg.get("content", ""), "tool_calls": msg.get("tool_calls", []), "finish_reason": choice.get("finish_reason", "")}
-        except urllib.error.HTTPError as e:
+        except (urllib.error.HTTPError,) as e:
             body = ""
             try:
                 body = e.read().decode("utf-8", errors="replace")
             except Exception:
                 pass
-            # 尝试从 JSON 响应体中提取 message 字段
-            detail = body
             err_msg = f"Error: HTTP {e.code} {e.reason}"
-            if detail:
-                err_msg += f"\n{detail}"
+            if body:
+                err_msg += f"\n{body}"
             return {"content": err_msg, "tool_calls": [], "finish_reason": "error"}
         except Exception as e:
             return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error"}
@@ -856,6 +902,7 @@ class Controller:
             tools = self.registry.schemas()
             if not self.provider:
                 return "Error: no provider"
+            # KeyboardInterrupt 在此处直接向上传播，不捕获
             response = self.provider.chat(messages, tools, self.cfg.agent.temperature)
             content = response.get("content", "")
             tool_calls = response.get("tool_calls", [])
@@ -881,9 +928,10 @@ class Controller:
                     except json.JSONDecodeError:
                         args = {}
                     tool = self.registry.get(tname)
+                    # 工具执行期间的 KeyboardInterrupt 同样向上传播
                     result = tool.execute(self.context, args) if tool else f"Error: tool '{tname}' not found"
                     self.context.add_tool_result(tname, tid, result)
-                    call_str = f"call: {tname}\nargs: {json.dumps(args, ensure_ascii=False)[:300]}"
+                    call_str = f"call: {tname}\nargs: {json.dumps(args, ensure_ascii=False)[:1024]}"
                     res_str = f"result:\n{result[:600]}"
                     log_box("tool", f"{call_str}\n{'─' * 36}\n{res_str}")
             else:
@@ -913,12 +961,18 @@ def _read_input_auto(timeout: float = 0.08) -> str:
     # Lazily start a background reader thread (daemon — exits with the main process).
     if not hasattr(_read_input_auto, "_queue"):
         q: queue.Queue = queue.Queue()
+        ready = threading.Event()  # 主线程放好 prompt 后 set，线程读完后 clear
         _read_input_auto._queue = q  # type: ignore[attr-defined]
+        _read_input_auto._prompt_holder = [""]  # type: ignore[attr-defined]
+        _read_input_auto._ready = ready  # type: ignore[attr-defined]
 
         def _reader() -> None:
             while True:
+                _read_input_auto._ready.wait()  # 等主线程准备好 # type: ignore[attr-defined]
+                prompt = _read_input_auto._prompt_holder[0]  # type: ignore[attr-defined]
+                _read_input_auto._ready.clear()  # type: ignore[attr-defined]
                 try:
-                    q.put(input())
+                    q.put(input(prompt))
                 except (EOFError, KeyboardInterrupt):
                     q.put(None)
                     break
@@ -926,6 +980,8 @@ def _read_input_auto(timeout: float = 0.08) -> str:
         threading.Thread(target=_reader, daemon=True).start()
 
     q = _read_input_auto._queue  # type: ignore[attr-defined]
+    _read_input_auto._prompt_holder[0] = "> "  # type: ignore[attr-defined]
+    _read_input_auto._ready.set()  # type: ignore[attr-defined]
 
     first = q.get()
     if first is None:
@@ -983,7 +1039,6 @@ def main(argv=None) -> None:
     else:
         print("Reasonix ready. Enter requests (Ctrl-D to exit). Commands: /new, /model")
         while True:
-            print("> ", end="", flush=True)
             try:
                 req = _read_input_auto()
             except EOFError:
@@ -1010,7 +1065,7 @@ def main(argv=None) -> None:
             try:
                 print(f"\n{ctrl.run(req)}\n")
             except KeyboardInterrupt:
-                print("\n[Interrupted]")
+                print("\n\n⚠️  已取消（Ctrl+C）。上下文已保留，可继续输入新请求。")
                 continue
         sid = ctrl.save_session()
         print(f"\nSession saved. Resume with: --resume {sid}")

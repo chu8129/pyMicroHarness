@@ -16,15 +16,16 @@ import json
 
 
 def _load_dotenv(env_file: str = ".env") -> None:
-    """从 .env 文件补充环境变量（不覆盖已有的系统环境变量）。"""
+    """Load environment variables from .env file (do not override system env)."""
     try:
         from dotenv import load_dotenv
 
         load_dotenv(env_file, override=False)
     except ImportError:
-        pass  # python-dotenv 未安装时静默跳过
+        pass  # Skip if python-dotenv is not installed
 
 
+import re
 import glob
 import subprocess
 import readline
@@ -33,6 +34,7 @@ from typing import Any, Optional, List, Dict
 from typing import List as TypingList  # noqa: F401
 from enum import Enum
 from pathlib import Path
+import urllib.request
 import logging
 
 logger = logging
@@ -42,13 +44,11 @@ logger = logging
 # =============================================================================
 try:
     import yaml
-except ImportError:
-    raise ImportError("PyYAML is required. Install: pip install pyyaml")
-
-try:
+    from loguru import logger
+    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
     from pydantic import BaseModel, Field
-except ImportError:
-    raise ImportError("Pydantic is required. Install: pip install pydantic")
+except ImportError as e:
+    raise ImportError(f"Required dependencies missing: {e}. Install: pip install pyyaml loguru tenacity")
 
 
 # =============================================================================
@@ -111,6 +111,7 @@ class ProviderEntry(BaseModel):
     api_key_env: str = ""
     context_window: int = 0
     request_timeout: int = 120
+    retry_times: int = 3
     price: Dict[str, float] = Field(default_factory=dict)
     effort: str = ""
     thinking: str = ""
@@ -241,23 +242,17 @@ _LOG_STYLES = {
 
 
 def log_box(category: str, text: str, max_width: int = 0) -> None:
-    """Print text in a left-bordered box with category label.
-
-    max_width=0 (default) means no per-line truncation.
-    """
+    """Print text in a left-bordered box with category label."""
     style = _LOG_STYLES.get(category, (category.upper(), "│"))
     label, bar = style
     lines = text.splitlines() or [""]
-    # truncate long lines only when a positive limit is requested
     if max_width > 0:
         lines = [l[:max_width] for l in lines]
     width = max(len(label) + 2, max(len(l) for l in lines) + 2, 40)
-    top = f"┌─ {label} {'─' * (width - len(label) - 3)}"
-    bot = f"└{'─' * (width)}"
-    print(top)
+    logger.info(f"┌─ {label} {'─' * (width - len(label) - 3)}")
     for l in lines:
-        print(f"{bar} {l}")
-    print(bot)
+        logger.info(f"{bar} {l}")
+    logger.info(f"└{'─' * (width)}")
 
 
 # =============================================================================
@@ -323,6 +318,7 @@ class ReadFileTool(Tool):
         try:
             return Path(args["path"]).read_text(encoding="utf-8")
         except Exception as e:
+            logger.error(f"Failed to read file {args.get('path')}: {e}")
             return f"Error: {e}"
 
 
@@ -415,11 +411,14 @@ class BashTool(Tool):
             result = subprocess.run(args["command"], shell=True, capture_output=True, text=True, timeout=self.timeout, executable=self.path or None)
             out = result.stdout
             if result.returncode != 0:
+                logger.error(f"Bash command failed: {args['command']}\n{result.stderr}")
                 out += f"\n[exit {result.returncode}]\n{result.stderr}"
             return out or "(no output)"
         except subprocess.TimeoutExpired:
+            logger.error(f"Bash command timed out: {args['command']}")
             return f"Error: timed out after {self.timeout}s"
         except Exception as e:
+            logger.error(f"Bash command error: {args['command']}: {e}")
             return f"Error: {e}"
 
 
@@ -440,8 +439,6 @@ class GrepTool(Tool):
         return True
 
     def execute(self, ctx, args):
-        import re
-
         pattern, path = args["pattern"], Path(args["path"])
         try:
             if self.rg_path and Path(self.rg_path).exists():
@@ -515,8 +512,6 @@ class WebFetchTool(Tool):
 
     def execute(self, ctx, args):
         try:
-            import urllib.request
-
             req = urllib.request.Request(args["url"], headers={"User-Agent": "Harness/1.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return resp.read().decode("utf-8", errors="replace")
@@ -544,7 +539,9 @@ class AskTool(Tool):
         if not sys.stdin.isatty():
             return "<model-assumption> Proceeding with default."
         try:
-            return input("Your choice: ")
+            choice = input("Your choice: ")
+            logger.info(f"User chose: {choice}")
+            return choice
         except EOFError:
             return "<model-assumption> Proceeding with default."
 
@@ -810,87 +807,51 @@ class Provider:
         self.entry = entry
         self.api_key = os.environ.get(entry.api_key_env, "") or entry.api_key_env
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type((Exception,)), before_sleep=lambda retry_state: logger.warning(f"Retrying LLM call: attempt {retry_state.attempt_number}..."))
     def chat(self, messages: List[dict], tools: List[dict], temperature: float = 0.0) -> dict:
-        """发送请求到 LLM。在子线程中执行阻塞的 HTTP 调用，主线程轮询 future
-        以便 Ctrl+C（KeyboardInterrupt）能即时响应并取消请求。"""
-        import urllib.request
-        import urllib.error
-        import concurrent.futures
-        import threading
-        import time
+        """Send request to LLM using litellm (supporting OpenAI/Gemini/Anthropic, etc.)."""
+        from litellm import completion, exceptions
 
-        payload = {"model": self.entry.model, "messages": messages, "temperature": temperature}
+        # Define retry capture logic
+        def is_retryable(ex):
+            return isinstance(
+                ex,
+                (
+                    exceptions.RateLimitError,
+                    exceptions.ServiceUnavailableError,
+                    exceptions.APIError,
+                    exceptions.Timeout,
+                ),
+            )
+
+        kwargs = {
+            "model": self.entry.model,
+            "messages": messages,
+            "temperature": temperature,
+            "timeout": self.entry.request_timeout,
+            "api_key": self.api_key,
+        }
         if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
-        data = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
-        url = f"{self.entry.base_url.rstrip('/')}/chat/completions"
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        if self.entry.base_url:
+            kwargs["api_base"] = self.entry.base_url
 
-        # 用于通知子线程停止重试的标志
-        _cancel = threading.Event()
-
-        def _call_once():
-            """单次 HTTP 请求（在子线程中运行）。"""
-            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=self.entry.request_timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-
-        def _call_with_retry():
-            """最多重试 3 次，遇到取消信号立即退出。"""
-            last_exc: Optional[Exception] = None
-            for attempt in range(3):
-                if _cancel.is_set():
-                    raise InterruptedError("Request cancelled by user.")
-                try:
-                    return _call_once()
-                except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
-                    last_exc = e
-                    if _cancel.is_set():
-                        raise InterruptedError("Request cancelled by user.")
-                    if attempt < 2:
-                        # 分段 sleep，每 0.2 s 检查一次取消标志
-                        for _ in range(5):
-                            if _cancel.is_set():
-                                raise InterruptedError("Request cancelled by user.")
-                            time.sleep(0.2)
-            raise last_exc  # type: ignore[misc]
-
-        # 在独立线程池中执行，主线程以短超时轮询以响应 Ctrl+C
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(_call_with_retry)
         try:
-            while True:
-                try:
-                    result = future.result(timeout=0.2)
-                    break
-                except concurrent.futures.TimeoutError:
-                    continue  # 继续等待，让信号处理器有机会运行
-        except KeyboardInterrupt:
-            _cancel.set()  # 通知子线程停止重试
-            executor.shutdown(wait=False)
-            raise  # 向上传播，由 Controller / CLI 层处理
-        except urllib.error.HTTPError as e:
-            body = ""
-            try:
-                body = e.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
-            err_msg = f"Error: HTTP {e.code} {e.reason}"
-            if body:
-                err_msg += f"\n{body}"
-            return {"content": err_msg, "tool_calls": [], "finish_reason": "error"}
-        except (urllib.error.URLError, OSError, Exception) as e:
-            return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error"}
-        finally:
-            executor.shutdown(wait=False)
-
-        # 解析正常响应
-        try:
-            choice = result["choices"][0]
-            msg = choice["message"]
-            return {"content": msg.get("content", ""), "tool_calls": msg.get("tool_calls", []), "finish_reason": choice.get("finish_reason", "")}
+            response = completion(**kwargs)
+            choice = response.choices[0]
+            msg = choice.message
+            tool_calls = []
+            if msg.tool_calls:
+                tool_calls = [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in msg.tool_calls]
+            return {"content": msg.content or "", "tool_calls": tool_calls, "finish_reason": choice.finish_reason or ""}
+        except exceptions.AuthenticationError as e:
+            logger.error(f"Authentication failed: {e}")
+            return {"content": "Error: Authentication failed. Check your API key.", "tool_calls": [], "finish_reason": "error"}
         except Exception as e:
+            if is_retryable(e):
+                raise  # Trigger tenacity retry
+            logger.error(f"LLM call error: {e}")
             return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error"}
 
 
@@ -993,7 +954,7 @@ class Controller:
         self.provider = Provider(default)
         system_prompt = self.cfg.resolve_system_prompt(self.root)
         self.context = Context(system_prompt, self.cfg.agent)
-        log_box("boot", f"Workspace: {self.root}\nTools: {[t.name() for t in self.registry.list()]}\nSkills: {[s.name for s in self.cfg.enabled_skills()]}\nProvider: {self.provider.entry.name}")
+        log_box("boot", f"Workspace: {self.root}\nTools: {[t.name() for t in self.registry.list()]}\nSkills: {[s.name for s in self.cfg.enabled_skills()]}\nProvider: {self.provider.entry.name}\nModel: {self.provider.entry.model}\nBase URL: {self.provider.entry.base_url}")
 
     # ------------------------------------------------------------------
     # Plan-mode helpers
@@ -1048,50 +1009,54 @@ class Controller:
         self.context.add_user(composed_input)
         max_steps = self.cfg.agent.max_steps or 25
         last_content = ""
-        for _ in range(max_steps):
-            self.step_count += 1
-            print(f"\n{'=' * 40} Step {self.step_count} {'=' * 40}")
-            self.context.compact(force=False)
-            messages = self.context.to_openai()
-            tools = self.registry.schemas()
-            if not self.provider:
-                return "Error: no provider"
-            # KeyboardInterrupt propagates upward to be handled by the CLI layer.
-            response = self.provider.chat(messages, tools, self.cfg.agent.temperature)
-            content = response.get("content", "")
-            tool_calls = response.get("tool_calls", [])
-            finish = response.get("finish_reason", "")
-            model_parts = []
-            if finish:
-                model_parts.append(f"[finish={finish}]")
-            if content:
-                model_parts.append(content[:500])
-            if tool_calls:
-                tc_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
-                model_parts.append(f"\u2192 tools: {', '.join(tc_names)}")
-            if model_parts:
-                log_box("model", "\n".join(model_parts))
-            self.context.add_assistant(content or "", tool_calls=tool_calls or None)
-            last_content = content or last_content
-            if tool_calls:
-                for tc in tool_calls:
-                    tid = tc.get("id", "unknown")
-                    fn = tc.get("function", {})
-                    tname = fn.get("name", "")
-                    try:
-                        args = json.loads(fn.get("arguments", "{}")) if isinstance(fn.get("arguments"), str) else fn.get("arguments", {})
-                    except json.JSONDecodeError:
-                        args = {}
-                    # execute_gated blocks writers when plan_mode is on.
-                    result = self.registry.execute_gated(tname, self.context, args)
-                    self.context.add_tool_result(tname, tid, result)
-                    call_str = f"call: {tname}\nargs: {json.dumps(args, ensure_ascii=False)}"
-                    res_str = f"result:\n{result[:600]}"
-                    log_box("tool", f"{call_str}\n{'\u2500' * 36}\n{res_str}")
-            else:
-                return content or "(no response)"
-            if finish == "stop":
-                return content or "(stopped)"
+        try:
+            for _ in range(max_steps):
+                self.step_count += 1
+                logger.info(f"--- Step {self.step_count} ---")
+                self.context.compact(force=False)
+                messages = self.context.to_openai()
+                tools = self.registry.schemas()
+                if not self.provider:
+                    return "Error: no provider"
+                # KeyboardInterrupt propagates upward to be handled by the CLI layer.
+                response = self.provider.chat(messages, tools, self.cfg.agent.temperature)
+                content = response.get("content", "")
+                tool_calls = response.get("tool_calls", [])
+                finish = response.get("finish_reason", "")
+                model_parts = []
+                if finish:
+                    model_parts.append(f"[finish={finish}]")
+                if content:
+                    model_parts.append(content[:500])
+                if tool_calls:
+                    tc_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+                    model_parts.append(f"\u2192 tools: {', '.join(tc_names)}")
+                if model_parts:
+                    log_box("model", "\n".join(model_parts))
+                self.context.add_assistant(content or "", tool_calls=tool_calls or None)
+                last_content = content or last_content
+                if tool_calls:
+                    for tc in tool_calls:
+                        tid = tc.get("id", "unknown")
+                        fn = tc.get("function", {})
+                        tname = fn.get("name", "")
+                        try:
+                            args = json.loads(fn.get("arguments", "{}")) if isinstance(fn.get("arguments"), str) else fn.get("arguments", {})
+                        except json.JSONDecodeError:
+                            args = {}
+                        # execute_gated blocks writers when plan_mode is on.
+                        result = self.registry.execute_gated(tname, self.context, args)
+                        self.context.add_tool_result(tname, tid, result)
+                        call_str = f"call: {tname}\nargs: {json.dumps(args, ensure_ascii=False)}"
+                        res_str = f"result:\n{result[:600]}"
+                        log_box("tool", f"{call_str}\n{'\u2500' * 36}\n{res_str}")
+                else:
+                    return content or "(no response)"
+                if finish == "stop":
+                    return content or "(stopped)"
+        except KeyboardInterrupt:
+            logger.warning("\nInterrupted by user. Context retained.")
+            return "(Interrupted by user)"
         return last_content or "(max_steps reached)"
 
     def run(self, user_request: str) -> str:
@@ -1209,20 +1174,19 @@ def _read_input_auto(timeout: float = 0.08) -> str:
 
 
 COMMANDS_HELP = """
-┌────────────────────────────────────────────────────────────────────────────────
-│  Harness 命令帮助
-├────────────────────────────────────────────────────────────────────────────────
-│  /new                   — 开始新对话（自动保存当前会话）
-│  /clear                 — 同 /new，清空当前对话上下文
-│  /model                 — 列出所有可用 provider
-│  /model <名称或编号>       — 切换到指定 provider（支持名称或列表序号）
-│  /plan                  — 开启 plan 模式（下一条请求会先规划，再等待确认后执行）
-│  /plan on               — 开启 plan 模式
-│  /plan off              — 关闭 plan 模式（解除写入封锁）
-│  /plan status           — 查看 plan 模式当前状态
-│  Ctrl-C                 — 取消当前请求（保留上下文）
-│  Ctrl-D / EOF           — 退出（自动保存会话）
-└────────────────────────────────────────────────────────────────────────────────
+Harness Command Help
+────────────────────────────────────────────────────────────────────────────────
+/new                   — Start a new conversation (automatically saves the current session)
+/clear                 — Same as /new, clears the current conversation context
+/model                 — List all available providers
+/model <name or index> — Switch to the specified provider (supports name or list index)
+/plan                  — Enable plan mode (next request will be planned first, then await confirmation)
+/plan on               — Enable plan mode
+/plan off              — Disable plan mode (unlocks write operations)
+/plan status           — Check current plan mode status
+Ctrl-C                 — Cancel current request (retains context)
+Ctrl-D / EOF           — Exit (automatically saves session)
+────────────────────────────────────────────────────────────────────────────────
 """
 
 
@@ -1305,7 +1269,7 @@ def main(argv=None) -> None:
             try:
                 print(f"\n{ctrl.run(req)}\n")
             except KeyboardInterrupt:
-                print("\n\n⚠️  已取消（Ctrl+C）。上下文已保留，可继续输入新请求。")
+                print("\n\n⚠️  Cancelled (Ctrl+C). Context retained, feel free to send new requests.")
                 continue
         sid = ctrl.save_session()
         print(f"\nSession saved. Resume with: --resume {sid}")

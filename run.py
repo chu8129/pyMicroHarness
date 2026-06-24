@@ -111,6 +111,7 @@ class ProviderEntry(BaseModel):
     api_key_env: str = ""
     context_window: int = 0
     request_timeout: int = 120
+    delay_seconds: float = 0.0  # New: Request delay for this model
     retry_times: int = 3
     price: Dict[str, float] = Field(default_factory=dict)
     effort: str = ""
@@ -811,6 +812,12 @@ class Provider:
     def chat(self, messages: List[dict], tools: List[dict], temperature: float = 0.0) -> dict:
         """Send request to LLM using litellm (supporting OpenAI/Gemini/Anthropic, etc.)."""
         from litellm import completion, exceptions
+        import time
+
+        # Apply delay if configured
+        if self.entry.delay_seconds > 0:
+            logger.info(f"Delaying {self.entry.delay_seconds}s before request...")
+            time.sleep(self.entry.delay_seconds)
 
         # Define retry capture logic
         def is_retryable(ex):
@@ -845,6 +852,9 @@ class Provider:
             if msg.tool_calls:
                 tool_calls = [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in msg.tool_calls]
             return {"content": msg.content or "", "tool_calls": tool_calls, "finish_reason": choice.finish_reason or ""}
+        except exceptions.RateLimitError as e:
+            logger.error(f"Rate limit exceeded: {e}")
+            return {"content": f"Error: API Rate Limit Exceeded. Please wait a moment and try again. Original error: {str(e)}", "tool_calls": [], "finish_reason": "error"}
         except exceptions.AuthenticationError as e:
             logger.error(f"Authentication failed: {e}")
             return {"content": "Error: Authentication failed. Check your API key.", "tool_calls": [], "finish_reason": "error"}

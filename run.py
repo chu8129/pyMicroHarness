@@ -7,6 +7,15 @@ Changes from v1:
   - All config loaded from YAML (Pydantic models)
   - Skills are configurable via YAML, not hardcoded
   - Significant code simplification
+
+Usage Example:
+  # Simple query
+  python3 run.py "Hello, who are you?"
+
+  # Enable plan mode and ask
+  python3 run.py --root .
+  > /plan
+  > Create a new file named test.txt with content 'hello'
 """
 
 from __future__ import annotations
@@ -16,13 +25,13 @@ import json
 
 
 def _load_dotenv(env_file: str = ".env") -> None:
-    """Load environment variables from .env file (do not override system env)."""
+    """Load environment variables from .env file."""
     try:
         from dotenv import load_dotenv
 
         load_dotenv(env_file, override=False)
     except ImportError:
-        pass  # Skip if python-dotenv is not installed
+        raise ImportError("Required dependency 'python-dotenv' is missing. Please install it with: pip install python-dotenv")
 
 
 import re
@@ -168,7 +177,6 @@ class Config(BaseModel):
         return cfg
 
     def _merge_yaml(self, path: Path) -> Config:
-        """Merge YAML file into current config recursively."""
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         current = self.model_dump()
@@ -188,21 +196,16 @@ class Config(BaseModel):
         stripped = value.strip()
         if not stripped.lower().startswith("file:"):
             return value
-        file_path_str = stripped[5:].strip()  # strip "file:" prefix
+        file_path_str = stripped[5:].strip()
         file_path = Path(file_path_str)
         if not file_path.is_absolute():
             file_path = Path(root) / file_path
         try:
             return file_path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            raise FileNotFoundError(f"system_prompt file not found: {file_path}\n" f"  (referenced as '{file_path_str}' relative to '{root}')")
+            raise FileNotFoundError(f"system_prompt file not found: {file_path}")
 
     def resolve_system_prompt(self, root: str) -> str:
-        """Build system prompt with customizations.
-
-        system_prompt and language_policy both support 'file:' references, e.g.:
-          system_prompt: "file:my_prompt.md"
-        """
         base = self._resolve_text_or_file(self.agent.system_prompt, root)
         if self.agent.language_policy:
             base += "\n\n" + self._resolve_text_or_file(self.agent.language_policy, root)
@@ -266,13 +269,11 @@ def should_enable(tool_name: str, enabled_list: List[str]) -> bool:
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge override into base."""
     result = base.copy()
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
         elif key in result and isinstance(result[key], list) and isinstance(value, list):
-            # For lists, override replaces (standard YAML merge behavior)
             result[key] = value
         else:
             result[key] = value
@@ -319,7 +320,7 @@ class ReadFileTool(Tool):
         try:
             return Path(args["path"]).read_text(encoding="utf-8")
         except Exception as e:
-            logger.error(f"Failed to read file {args.get('path')}: {e}")
+            logger.error(f"Failed to read file: {e}")
             return f"Error: {e}"
 
 
@@ -1124,30 +1125,21 @@ class Controller:
 
 
 def _read_input_auto(timeout: float = 0.08) -> str:
-    """Read input and auto-detect multi-line paste.
-
-    In an interactive terminal, after reading the first line a short timeout
-    window is opened.  Lines arriving within that window are treated as a
-    single pasted block and merged together.  Lines typed manually have a
-    longer inter-line delay, so only the current line is returned after the
-    timeout expires.
-    """
     import queue
     import threading
 
-    # Lazily start a background reader thread (daemon — exits with the main process).
     if not hasattr(_read_input_auto, "_queue"):
         q: queue.Queue = queue.Queue()
-        ready = threading.Event()  # 主线程放好 prompt 后 set，线程读完后 clear
-        _read_input_auto._queue = q  # type: ignore[attr-defined]
-        _read_input_auto._prompt_holder = [""]  # type: ignore[attr-defined]
-        _read_input_auto._ready = ready  # type: ignore[attr-defined]
+        ready = threading.Event()
+        _read_input_auto._queue = q
+        _read_input_auto._prompt_holder = [""]
+        _read_input_auto._ready = ready
 
         def _reader() -> None:
             while True:
-                _read_input_auto._ready.wait()  # 等主线程准备好 # type: ignore[attr-defined]
-                prompt = _read_input_auto._prompt_holder[0]  # type: ignore[attr-defined]
-                _read_input_auto._ready.clear()  # type: ignore[attr-defined]
+                _read_input_auto._ready.wait()
+                prompt = _read_input_auto._prompt_holder[0]
+                _read_input_auto._ready.clear()
                 try:
                     q.put(input(prompt))
                 except (EOFError, KeyboardInterrupt):
@@ -1156,9 +1148,9 @@ def _read_input_auto(timeout: float = 0.08) -> str:
 
         threading.Thread(target=_reader, daemon=True).start()
 
-    q = _read_input_auto._queue  # type: ignore[attr-defined]
-    _read_input_auto._prompt_holder[0] = "> "  # type: ignore[attr-defined]
-    _read_input_auto._ready.set()  # type: ignore[attr-defined]
+    q = _read_input_auto._queue
+    _read_input_auto._prompt_holder[0] = "> "
+    _read_input_auto._ready.set()
 
     first = q.get()
     if first is None:
@@ -1166,11 +1158,9 @@ def _read_input_auto(timeout: float = 0.08) -> str:
 
     lines = [first]
 
-    # Non-interactive terminal (pipe / redirect): skip multi-line detection.
     if not sys.stdin.isatty():
         return first
 
-    # Collect subsequent lines within the timeout window (pasted lines arrive instantly).
     while True:
         try:
             line = q.get(timeout=timeout)

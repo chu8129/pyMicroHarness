@@ -564,6 +564,9 @@ class TodoWriteTool(Tool):
     def execute(self, ctx, args):
         if hasattr(ctx, "todos"):
             ctx.todos = args["todos"]
+            # Visual feedback for task progress in terminal
+            todo_display = "\n".join([f"  [{t['status']:<11}] {t['content']}" for t in args['todos']])
+            print(f"\n\U0001f4dd TASK PROGRESS:\n{todo_display}\n")
         return f"Updated {len(args['todos'])} todos"
 
 
@@ -1142,9 +1145,12 @@ def _read_input_auto(timeout: float = 0.08) -> str:
                 _read_input_auto._ready.clear()
                 try:
                     q.put(input(prompt))
-                except (EOFError, KeyboardInterrupt):
+                except EOFError:
                     q.put(None)
                     break
+                except KeyboardInterrupt:
+                    q.put("")
+                    print("\n") # New line for visual clean-up
 
         threading.Thread(target=_reader, daemon=True).start()
 
@@ -1155,6 +1161,10 @@ def _read_input_auto(timeout: float = 0.08) -> str:
     first = q.get()
     if first is None:
         raise EOFError()
+    
+    # Check if first is empty due to interruption
+    if first == "":
+        return ""
 
     lines = [first]
 
@@ -1169,6 +1179,10 @@ def _read_input_auto(timeout: float = 0.08) -> str:
             lines.append(line)
         except queue.Empty:
             break
+        except KeyboardInterrupt:
+            # Handle Ctrl+C mid-input as a request to cancel, return an empty string
+            print("\n")
+            return ""
 
     return "\n".join(lines)
 
@@ -1226,6 +1240,8 @@ def main(argv=None) -> None:
         while True:
             try:
                 req = _read_input_auto()
+                if not req:
+                    continue
             except EOFError:
                 print()
                 break

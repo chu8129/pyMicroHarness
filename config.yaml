@@ -1,4 +1,4 @@
-# Reasonix 主配置文件
+# Harness 主配置文件
 # 加载优先级: flag > ./config.yaml > ~/.reasonix/config.yaml > 内置默认值
 
 # LLM 提供商配置 (OpenAI-compatible)
@@ -10,6 +10,8 @@ providers:
     api_key_env: BEDROCK_API_KEY
     context_window: 8192
     request_timeout: 120
+    retry_time: 3
+    delay: 0.3
 
   - name: kimi
     kind: openai
@@ -18,6 +20,8 @@ providers:
     api_key_env: KIMI_API_KEY
     context_window: 32678
     request_timeout: 120
+    retry_time: 3
+    delay: 0.3
 
   - name: bai
     kind: openai
@@ -26,6 +30,19 @@ providers:
     api_key_env: BAI_API_KEY
     context_window: 32678
     request_timeout: 120
+    retry_time: 3
+    delay: 0.3
+
+  - name: gemini
+    default: true
+    kind: openai
+    model: gemini/gemini-3-flash-preview
+    model: gemini/gemini-3.1-flash-lite
+    api_key_env: GEMINI_API_KEY
+    context_window: 65536
+    request_timeout: 120
+    retry_time: 3
+    delay: 0.3
 
 # Agent 行为配置
 agent:
@@ -34,7 +51,7 @@ agent:
   #   2. 引用外部文件: system_prompt: "file:my_prompt.md"
   #      路径相对于本配置文件所在目录 (也可用绝对路径)
   system_prompt: |
-    You are Reasonix, a coding agent focused on executing code tasks.
+    You are Harness, a coding agent focused on executing code tasks.
     Use the provided tools to read and write files and run shell commands.
     Principles: understand the request before acting; verify with tools instead of
     guessing; keep changes minimal and correct; briefly summarize what you did.

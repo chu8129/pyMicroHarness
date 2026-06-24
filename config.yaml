@@ -34,11 +34,21 @@ providers:
     delay: 0.3
 
   - name: gemini
-    default: true
     kind: openai
     model: gemini/gemini-3-flash-preview
     model: gemini/gemini-3.1-flash-lite
     api_key_env: GEMINI_API_KEY
+    context_window: 65536
+    request_timeout: 60
+    retry_time: 5
+    delay: 2
+    default: true
+
+  - name: mota
+    kind: openai
+    base_url: https://api-inference.modelscope.cn/v1
+    model: moonshotai/Kimi-K2.7-Code:Moonshot
+    api_key_env: MOTA_API_KEY
     context_window: 65536
     request_timeout: 60
     retry_time: 5

@@ -264,6 +264,7 @@ _LOG_STYLES = {
     "tool": ("🔧 TOOL", "│"),
     "mcp": ("🌐 MCP", "│"),
     "boot": ("🚀 SYSTEM STARTUP", "║"),
+    "help": ("ℹ️ HELP", "│"),
 }
 
 
@@ -1310,8 +1311,26 @@ def _read_input_auto(timeout: float = 0.08) -> str:
 
 
 def print_help():
-    help_text = "COMMAND              DESCRIPTION\n" "──────────────────────────  ──────────────────────────────────────────────────────────────────────────\n" "/new                 Start a new conversation (automatically saves the current session)\n" "/clear               Same as /new, clears the current conversation context\n" "/model               List all available providers\n" "/model <name/idx>    Switch to the specified provider (supports name or list index)\n" "/plan                Enable plan mode (next request will be planned first, then await confirmation)\n" "/plan on             Enable plan mode\n" "/plan off            Disable plan mode (unlocks write operations)\n" "/plan status         Check current plan mode status\n" "/context             Display current context and LLM payload\n" "Ctrl-C               Cancel and exit\n" "Ctrl-D / EOF         Exit (automatically saves session)\n" "/exit, /quit         Exit (automatically saves session)"
-    log_box("boot", help_text)
+    help_text = """
+SYNOPSIS
+  Harness Kernel [options] [request]
+
+COMMANDS
+  /new              Start a new conversation (automatically saves current session)
+  /clear            Same as /new, clears conversation context
+  /model            List all available providers
+  /model <name/idx> Switch to the specified provider
+  /plan             Enable plan mode (next request is planned before execution)
+  /plan [on/off]    Enable or disable plan mode
+  /plan status      Check current plan mode status
+  /context          Display current context and LLM request payload
+  /exit, /quit      Exit (automatically saves session)
+
+INTERRUPTS
+  Ctrl-C            Cancel the current operation
+  Ctrl-D            Exit the interactive session
+"""
+    log_box("help", help_text)
 
 
 def main(argv=None) -> None:

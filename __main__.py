@@ -1310,26 +1310,8 @@ def _read_input_auto(timeout: float = 0.08) -> str:
 
 
 def print_help():
-    from rich.panel import Panel
-    from rich.table import Table
-
-    table = Table(show_header=False, box=None)
-    table.add_column("Command")
-    table.add_column("Description")
-    table.add_row("COMMAND", "DESCRIPTION")
-    table.add_row("──────────────────────────", "──────────────────────────────────────────────────────────────────────────")
-    table.add_row("/new", "Start a new conversation (automatically saves the current session)")
-    table.add_row("/clear", "Same as /new, clears the current conversation context")
-    table.add_row("/model", "List all available providers")
-    table.add_row("/model <name/idx>", "Switch to the specified provider (supports name or list index)")
-    table.add_row("/plan", "Enable plan mode (next request will be planned first, then await confirmation)")
-    table.add_row("/plan on", "Enable plan mode")
-    table.add_row("/plan off", "Disable plan mode (unlocks write operations)")
-    table.add_row("/plan status", "Check current plan mode status")
-    table.add_row("Ctrl-C", "Cancel and exit")
-    table.add_row("Ctrl-D / EOF", "Exit (automatically saves session)")
-    table.add_row("/exit, /quit", "Exit (automatically saves session)")
-    console.print(Panel(table, title="[bold blue]Harness Command Help[/bold blue]", expand=False, border_style="blue"))
+    help_text = "COMMAND              DESCRIPTION\n" "──────────────────────────  ──────────────────────────────────────────────────────────────────────────\n" "/new                 Start a new conversation (automatically saves the current session)\n" "/clear               Same as /new, clears the current conversation context\n" "/model               List all available providers\n" "/model <name/idx>    Switch to the specified provider (supports name or list index)\n" "/plan                Enable plan mode (next request will be planned first, then await confirmation)\n" "/plan on             Enable plan mode\n" "/plan off            Disable plan mode (unlocks write operations)\n" "/plan status         Check current plan mode status\n" "/context             Display current context and LLM payload\n" "Ctrl-C               Cancel and exit\n" "Ctrl-D / EOF         Exit (automatically saves session)\n" "/exit, /quit         Exit (automatically saves session)"
+    log_box("boot", help_text)
 
 
 def main(argv=None) -> None:

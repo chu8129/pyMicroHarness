@@ -234,9 +234,6 @@ class Config(BaseModel):
             base += "\n\n" + self._resolve_text_or_file(self.agent.language_policy, root)
         if self.agent.output_style:
             base += f"\n\nOutput style: {self.agent.output_style}"
-        memory_path = Path(root) / "REASONIX.md"
-        if memory_path.exists():
-            base += f"\n\n# Project Memory\n{memory_path.read_text(encoding='utf-8')}"
         return base
 
     @property
@@ -1372,91 +1369,150 @@ def main(argv=None) -> None:
     else:
         ctrl.boot()
 
-    if args.request:
-        _stdout(f"\n=== Result ===")
-        rich_print(ctrl.run(args.request))
-    else:
+    initial_req = args.request
+    if not initial_req:
         print_help()
-        while True:
-            try:
+    one_shot = bool(args.request)
+
+    # --- Command dispatch table ---
+    def _cmd_help(req):
+        print_help()
+
+    def _cmd_exit(req):
+        raise StopIteration
+
+    def _cmd_new(req):
+        sid = ctrl.save_session()
+        ctrl.reset_context()
+        _stdout(f"New context started. Previous session: --resume {sid}")
+
+    def _cmd_model(req):
+        parts = req.split(None, 1)
+        if len(parts) == 1:
+            _stdout("\n".join(ctrl.list_providers()))
+        else:
+            _stdout(ctrl.switch_provider(parts[1]))
+
+    def _cmd_context(req):
+        if ctrl.context:
+            messages = ctrl.context.to_openai()
+            tools = ctrl.registry.schemas()
+            payload = {"model": ctrl.provider.entry.model if ctrl.provider else "default", "messages": messages, "tools": tools, "temperature": ctrl.cfg.agent.temperature, "todos": ctrl.context.todos}
+            _stdout("\n--- Simulated LLM Request Payload ---")
+            _stdout(json.dumps(payload, indent=2, ensure_ascii=False))
+            _stdout("-------------------------------------\n")
+        else:
+            _stdout("Context is empty.")
+
+    def _cmd_skills(req):
+        skills = sorted(ctrl.cfg.enabled_skills(), key=lambda s: s.name)
+        _stdout("Available skills:\n" + "\n".join([f"/{s.name} — {s.description[:47] + '...' if len(s.description) > 50 else s.description}" for s in skills]))
+
+    def _cmd_tools(req):
+        _stdout("Available tools:\n" + "\n".join([f"  {t.name()}" for t in ctrl.registry.list()]))
+
+    def _cmd_plan(req):
+        parts = req.split(None, 1)
+        sub = parts[1].strip().lower() if len(parts) > 1 else "on"
+        if sub in ("off", "disable", "false", "0"):
+            ctrl.set_plan_mode(False)
+            _stdout("Plan mode: OFF — writers unblocked.")
+        elif sub in ("status",):
+            state = "ON" if ctrl.plan_mode else "OFF"
+            _stdout(f"Plan mode: {state}")
+        else:
+            ctrl.set_plan_mode(True)
+            _stdout("Plan mode: ON — next request will be planned before execution.")
+            _stdout("  Writers are blocked until you approve the plan.")
+            _stdout("  Use /plan off to cancel without sending a request.")
+
+    # Exact-match commands
+    COMMANDS = {
+        "/help": _cmd_help,
+        "?": _cmd_help,
+        "/exit": _cmd_exit,
+        "/quit": _cmd_exit,
+        "q": _cmd_exit,
+        "/new": _cmd_new,
+        "/clear": _cmd_new,
+        "/context": _cmd_context,
+        "/skills": _cmd_skills,
+        "/tools": _cmd_tools,
+    }
+    # Prefix-match commands (checked in order)
+    PREFIX_COMMANDS = [
+        ("/model", _cmd_model),
+        ("/plan", _cmd_plan),
+    ]
+
+    while True:
+        try:
+            if initial_req:
+                req = initial_req
+                initial_req = None
+                _stdout(f"\n=== Result ===")
+            else:
                 req = _read_input_auto()
                 if not req:
                     continue
-            except (EOFError, KeyboardInterrupt):
-                _stdout("")
+        except (EOFError, KeyboardInterrupt):
+            _stdout("")
+            break
+        req = req.strip()
+        if not req:
+            if one_shot:
                 break
-            req = req.strip()
-            if not req:
-                continue
-            if req in ("/help", "?"):
-                print_help()
-                continue
-            if req in ("/exit", "/quit"):
-                break
-            if req == "q":
-                break
-            if req in ("/new", "/clear"):
-                sid = ctrl.save_session()
-                ctrl.reset_context()
-                _stdout(f"New context started. Previous session: --resume {sid}")
-                continue
-            if req.startswith("/model"):
-                parts = req.split(None, 1)
-                if len(parts) == 1:
-                    _stdout("\n".join(ctrl.list_providers()))
-                else:
-                    _stdout(ctrl.switch_provider(parts[1]))
-                continue
-            if req == "/context":
-                if ctrl.context:
-                    # 获取即将发送给 LLM 的数据结构
-                    messages = ctrl.context.to_openai()
-                    tools = ctrl.registry.schemas()
-                    payload = {"model": ctrl.provider.entry.model if ctrl.provider else "default", "messages": messages, "tools": tools, "temperature": ctrl.cfg.agent.temperature, "todos": ctrl.context.todos}
-                    _stdout("\n--- Simulated LLM Request Payload ---")
-                    _stdout(json.dumps(payload, indent=2, ensure_ascii=False))
-                    _stdout("-------------------------------------\n")
-                else:
-                    _stdout("Context is empty.")
-                continue
-            if req == "/skills":
-                _stdout(f"Available skills:\n" + "\n".join([f"/{s.name} — {s.description[:47] + '...' if len(s.description) > 50 else s.description}" for s in ctrl.cfg.enabled_skills()]))
-                continue
-            if req.startswith("/") and ctrl.cfg.get_skill(req[1:].split()[0]):
-                skill_name, *skill_args = req[1:].split()
-                skill = ctrl.cfg.get_skill(skill_name)
-                _stdout(f"Triggering skill: {skill_name} with args: {skill_args}")
-                # 实际执行逻辑：将 skill.body 和参数注入到 context 中进行对话
-                ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill directory: {skill.path}\n\nSkill definition:\n{skill.body}")
-                _stdout("")
-                rich_print(ctrl.run("Proceed with this skill execution"))
-                _stdout("")
-                continue
-            if req == "/plan" or req.startswith("/plan "):
-                parts = req.split(None, 1)
-                sub = parts[1].strip().lower() if len(parts) > 1 else "on"
-                if sub in ("off", "disable", "false", "0"):
-                    ctrl.set_plan_mode(False)
-                    _stdout("Plan mode: OFF — writers unblocked.")
-                elif sub in ("status",):
-                    state = "ON" if ctrl.plan_mode else "OFF"
-                    _stdout(f"Plan mode: {state}")
-                else:
-                    # "on" / "enable" / bare "/plan"
-                    ctrl.set_plan_mode(True)
-                    _stdout("Plan mode: ON — next request will be planned before execution.")
-                    _stdout("  Writers are blocked until you approve the plan.")
-                    _stdout("  Use /plan off to cancel without sending a request.")
-                continue
+            continue
+
+        # Dispatch system commands
+        handled = False
+        stop = False
+        if req in COMMANDS:
             try:
-                _stdout("")
-                rich_print(ctrl.run(req))
-                _stdout("")
-            except KeyboardInterrupt:
-                _stdout("\n\n⚠️  Cancelled (Ctrl+C). Exiting.")
+                COMMANDS[req](req)
+            except StopIteration:
                 break
-        sid = ctrl.save_session()
-        _stdout(f"\nSession saved. Resume with: --resume {sid}")
+            handled = True
+        else:
+            for prefix, handler in PREFIX_COMMANDS:
+                if req == prefix or req.startswith(prefix + " "):
+                    try:
+                        handler(req)
+                    except StopIteration:
+                        stop = True
+                    handled = True
+                    break
+            if not handled:
+                # Skill dispatch
+                if req.startswith("/") and ctrl.cfg.get_skill(req[1:].split()[0]):
+                    skill_name, *skill_args = req[1:].split()
+                    skill = ctrl.cfg.get_skill(skill_name)
+                    _stdout(f"Triggering skill: {skill_name} with args: {skill_args}")
+                    ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill directory: {skill.path}\n\nSkill definition:\n{skill.body}")
+                    _stdout("")
+                    rich_print(ctrl.run("Proceed with this skill execution"))
+                    _stdout("")
+                    handled = True
+        if stop:
+            break
+
+        if handled:
+            if one_shot:
+                break
+            continue
+
+        # Default: send to LLM
+        try:
+            _stdout("")
+            rich_print(ctrl.run(req))
+            _stdout("")
+            if one_shot:
+                break
+        except KeyboardInterrupt:
+            _stdout("\n\n⚠️  Cancelled (Ctrl+C). Exiting.")
+            break
+    sid = ctrl.save_session()
+    _stdout(f"\nSession saved. Resume with: --resume {sid}")
 
 
 # Rebuild models to resolve forward references

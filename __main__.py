@@ -336,7 +336,6 @@ class SafeTool(Tool, ABC):
         except Exception as e:
             logger.exception(f"Tool {self.name()} execution failed")
             return f"Error: Tool execution failed - {str(e)}"
-            return f"Error: Tool execution failed - {str(e)}"
 
     @abstractmethod
     def __call__(self, ctx: Any, args: dict) -> str: ...

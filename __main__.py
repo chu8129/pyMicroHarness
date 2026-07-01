@@ -344,6 +344,7 @@ class SafeTool(Tool, ABC):
         except Exception as e:
             logger.exception(f"Tool {self.name()} execution failed")
             return f"Error: Tool execution failed - {str(e)}"
+            return f"Error: Tool execution failed - {str(e)}"
 
     @abstractmethod
     def __call__(self, ctx: Any, args: dict) -> str: ...
@@ -354,16 +355,37 @@ class ReadFileTool(SafeTool):
         return "read_file"
 
     def description(self):
-        return "Read a file's contents."
+        return "Read a file's contents, with optional line/char limits."
 
     def schema(self):
-        return {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+        return {"type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer", "description": "Start line number (1-indexed)."}, "end_line": {"type": "integer", "description": "End line number (inclusive)."}, "max_chars": {"type": "integer", "description": "Maximum characters to read.", "default": 100000}}, "required": ["path", "start_line", "end_line"]}
 
     def read_only(self):
         return True
 
     def __call__(self, ctx, args):
-        return Path(args["path"]).read_text(encoding="utf-8")
+        path = Path(args["path"])
+        if not path.exists():
+            return f"Error: File not found: {path}"
+
+        start = args.get("start_line", 1)
+        end = args.get("end_line", 1)
+        max_chars = args.get("max_chars", 100000)
+
+        content = []
+        current_chars = 0
+
+        with open(path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f, 1):
+                if i >= start:
+                    if i > end:
+                        break
+                    content.append(line)
+                    current_chars += len(line)
+                    if current_chars >= max_chars:
+                        break
+
+        return "".join(content)
 
 
 class WriteFileTool(SafeTool):
@@ -491,10 +513,16 @@ class BashTool(SafeTool):
         self.active_processes = []
 
 
-class GrepTool(SafeTool):
-    def __init__(self, rg_path=""):
-        self.rg_path = rg_path
+def _find_binary(name: str) -> str:
+    """Find the absolute path of an executable binary."""
+    for path in os.environ.get("PATH", "").split(os.pathsep):
+        full_path = Path(path) / name
+        if full_path.exists() and os.access(full_path, os.X_OK):
+            return str(full_path)
+    return ""
 
+
+class GrepTool(SafeTool):
     def name(self):
         return "grep"
 
@@ -509,9 +537,6 @@ class GrepTool(SafeTool):
 
     def __call__(self, ctx, args):
         pattern, path = args["pattern"], Path(args["path"])
-        if self.rg_path and Path(self.rg_path).exists():
-            r = subprocess.run([self.rg_path, "--no-heading", "-n", "--with-filename", pattern, str(path)], capture_output=True, text=True)
-            return r.stdout or "(no matches)"
         rx = re.compile(pattern)
         files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
         matches = []
@@ -520,6 +545,9 @@ class GrepTool(SafeTool):
                 for i, line in enumerate(fp.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
                     if rx.search(line):
                         matches.append(f"{fp}:{i}:{line}")
+                        if len(matches) >= 1000:  # Simple safety limit
+                            matches.append("... (limit reached)")
+                            break
             except Exception:
                 continue
         return "\n".join(matches) if matches else "(no matches)"
@@ -625,9 +653,10 @@ class AskTool(SafeTool):
     def read_only(self):
         return True
 
-    def __call__(self, ctx, args):
-        _stdout(f"\n[ASK] {args['question']}")
-        for i, opt in enumerate(args.get("options", []), 1):
+    def execute(self, ctx: Any, args: dict) -> str:
+        _stdout(f"\n[ASK] {args.get('question')}")
+        options = args.get("options", [])
+        for i, opt in enumerate(options, 1):
             _stdout(f"  {i}. {opt}")
         if not sys.stdin.isatty():
             return "<model-assumption> Proceeding with default."
@@ -636,6 +665,11 @@ class AskTool(SafeTool):
             logger.info(f"User chose: {choice}")
             return choice
         except EOFError:
+            return "Cancelled"
+        except Exception as e:
+            logger.exception(f"Tool {self.name()} execution failed")
+            return f"Error: Tool execution failed - {str(e)}"
+            return "Cancelled"
             return "<model-assumption> Proceeding with default."
 
 
@@ -831,8 +865,6 @@ def register_all_builtins(reg: Registry, cfg: Config, root: str, proxy=None) -> 
             continue
         if cls is BashTool:
             reg.add(cls(prefer=cfg.tools.shell.prefer, path=cfg.tools.shell.path, timeout=cfg.tools.bash_timeout_seconds))
-        elif cls is GrepTool:
-            reg.add(cls(rg_path=""))
         elif cls is WebFetchTool:
             reg.add(cls(proxy=proxy))
         else:

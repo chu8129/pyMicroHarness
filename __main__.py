@@ -1084,9 +1084,9 @@ class Controller:
         self._plan_mode: bool = False
 
     def set_plan_mode(self, on: bool) -> None:
-        """Toggle plan mode and synchronise the registry gate."""
         self._plan_mode = on
         self.registry.plan_mode = on
+        _stdout(f"Plan mode: {'ON' if on else 'OFF'}")
 
     @property
     def plan_mode(self) -> bool:
@@ -1507,19 +1507,13 @@ def main(argv=None) -> None:
         parts = req.split(None, 1)
         sub = parts[1].strip().lower() if len(parts) > 1 else None
         if sub is None:
-            new_state = not ctrl.plan_mode
-            ctrl.set_plan_mode(new_state)
-            _stdout(f"Plan mode: {"ON" if new_state else "OFF"}")
+            ctrl.set_plan_mode(not ctrl.plan_mode)
         elif sub in ("on", "enable", "true", "1"):
             ctrl.set_plan_mode(True)
-            _stdout("Plan mode: ON — next request will be planned before execution.")
-            _stdout("  Writers are blocked until you approve the plan.")
         elif sub in ("off", "disable", "false", "0"):
             ctrl.set_plan_mode(False)
-            _stdout("Plan mode: OFF — writers unblocked.")
         elif sub in ("status",):
-            state = "ON" if ctrl.plan_mode else "OFF"
-            _stdout(f"Plan mode: {state}")
+            _stdout(f"Plan mode: {'ON' if ctrl.plan_mode else 'OFF'}")
         else:
             _stdout(f"Unknown plan mode argument: {sub}. Use /plan [on/off/status]")
 

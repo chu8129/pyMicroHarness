@@ -277,7 +277,6 @@ plan_approved_message: |
 tools:
   enabled: []
   shell:
-    prefer: auto                       # auto | bash | sh
     path: ""                           # 自定义 shell 路径
   bash_timeout_seconds: 120            # Bash 命令超时(秒)
   reflection_tools:

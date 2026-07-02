@@ -92,7 +92,6 @@ class AgentConfig(BaseModel):
 
 
 class ShellConfig(BaseModel):
-    prefer: str = "auto"
     path: str = ""
 
 
@@ -479,8 +478,8 @@ class ReflectionShellTool(SafeTool):
 
 
 class BashTool(SafeTool):
-    def __init__(self, prefer="auto", path="", timeout=120):
-        self.prefer, self.path, self.timeout = prefer, path, timeout
+    def __init__(self, path="", timeout=120):
+        self.path, self.timeout = path, timeout
         self.active_processes = []
 
     def name(self):
@@ -880,7 +879,7 @@ def register_all_builtins(reg: Registry, cfg: Config, root: str, proxy=None) -> 
             continue
 
         if cls is BashTool:
-            reg.add(cls(prefer=cfg.tools.shell.prefer, path=cfg.tools.shell.path, timeout=cfg.tools.bash_timeout_seconds))
+            reg.add(cls(path=cfg.tools.shell.path, timeout=cfg.tools.bash_timeout_seconds))
         elif cls is WebFetchTool:
             reg.add(cls(proxy=proxy))
         else:

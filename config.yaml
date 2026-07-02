@@ -235,14 +235,6 @@ agent:
   compact_ratio: 0.8                   # 压缩阈值
   compact_force_ratio: 0.9             # 强制压缩阈值
 
-tools:
-  enabled: []                          # 启用的工具 (空=全部)
-  # enabled: [read_file, bash, grep, web_fetch]
-  shell:
-    prefer: auto                       # auto | bash | sh
-    path: ""                           # 自定义 shell 路径
-  bash_timeout_seconds: 120            # Bash 命令超时(秒)
-
 skills:
   enabled: []                          # 启用的技能 (空=全部)
   # enabled: [explore, research]
@@ -281,3 +273,47 @@ plan_approved_message: |
   2) execute the sub-step; 
   3) mark it completed and move the next one to in_progress. 
   Sign off one sub-step at a time — never batch multiple completions.
+
+tools:
+  enabled: []
+  shell:
+    prefer: auto                       # auto | bash | sh
+    path: ""                           # 自定义 shell 路径
+  bash_timeout_seconds: 120            # Bash 命令超时(秒)
+  reflection_tools:
+    - name: shell_read_file
+      description: Read a file's contents using Linux tools (sed/head).
+      command: sed -n '{start_line},{end_line}p' '{path}' | head -c {max_chars}
+      read_only: true
+      platform: linux,darwin
+      schema:
+        type: object
+        properties:
+          path: {type: string}
+          start_line: {type: integer}
+          end_line: {type: integer}
+          max_chars: {type: integer}
+        required: [path, start_line, end_line]
+    - name: shell_edit_file
+      description: Edit a file with search/replace using Linux tools (perl).
+      command: perl -i -pe 'BEGIN{undef $/;} s/\Q{old_text}\E/{new_text}/' '{path}'
+      read_only: false
+      platform: linux,darwin
+      schema:
+        type: object
+        properties:
+          path: {type: string}
+          old_text: {type: string}
+          new_text: {type: string}
+        required: [path, old_text, new_text]
+    - name: shell_write_file
+      description: Write content to a file using Linux tools (printf).
+      command: printf '%s' '{content}' > '{path}'
+      read_only: false
+      platform: linux,darwin
+      schema:
+        type: object
+        properties:
+          path: {type: string}
+          content: {type: string}
+        required: [path, content]

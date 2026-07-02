@@ -96,8 +96,18 @@ class ShellConfig(BaseModel):
     path: str = ""
 
 
+class ReflectionToolConfig(BaseModel):
+    name: str
+    description: str
+    command: str
+    read_only: bool = True
+    schema_dict: dict = Field(alias="schema", default_factory=dict)
+    platform: Optional[str] = None  # 支持逗号分隔的平台列表，如 "linux,darwin"
+
+
 class ToolsConfig(BaseModel):
     enabled: List[str] = Field(default_factory=list)
+    reflection_tools: List[ReflectionToolConfig] = Field(default_factory=list)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     bash_timeout_seconds: int = 120
 
@@ -159,7 +169,6 @@ class Config(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     plan_mode_marker: str = ""
     plan_approved_message: str = ""
-    # skills_data is loaded separately from skills.yaml, not from main config
 
     @classmethod
     def load_for_root(cls, workspace_root: str) -> Config:
@@ -275,13 +284,11 @@ def log_box(category: str, text: str, max_width: int = 0) -> None:
     style = _LOG_STYLES.get(category, (category.upper(), "│"))
     label, _ = style
 
-    # Format list content: convert long strings (e.g. Tools/Skills lists) to newline display
     if category == "boot":
         formatted_text = text.replace("],", "],\n").replace(", ", "\n  ")
     else:
         formatted_text = text
 
-    # Create the panel
     panel = Panel(
         formatted_text,
         title=f"[bold]{label}[/bold]",
@@ -364,31 +371,6 @@ class WriteFileTool(SafeTool):
         return f"Wrote to {path} (via Python)"
 
 
-class ShellWriteFileTool(SafeTool):
-    def name(self):
-        return "shell_write_file"
-
-    def description(self):
-        return "Write content to a file using Linux tools (printf)."
-
-    def schema(self):
-        return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}
-
-    def read_only(self):
-        return False
-
-    def __call__(self, ctx, args):
-        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
-            return "Error: Permission denied by user."
-
-        path = Path(args["path"]).resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = ["printf", "%s", args["content"]]
-        with open(path, "w", encoding="utf-8") as f:
-            subprocess.check_call(cmd, stdout=f)
-        return f"Wrote to {path} (via Linux printf)"
-
-
 class ReadFileTool(SafeTool):
     def name(self):
         return "read_file"
@@ -425,25 +407,6 @@ class ReadFileTool(SafeTool):
         return "".join(content)
 
 
-class ShellReadFileTool(SafeTool):
-    def name(self):
-        return "shell_read_file"
-
-    def description(self):
-        return "Read a file's contents using Linux tools (sed/head)."
-
-    def schema(self):
-        return {"type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}, "max_chars": {"type": "integer", "default": 100000}}, "required": ["path", "start_line", "end_line"]}
-
-    def read_only(self):
-        return True
-
-    def __call__(self, ctx, args):
-        path = Path(args["path"]).resolve()
-        cmd = f"sed -n '{args['start_line']},{args['end_line']}p' '{path}' | head -c {args.get('max_chars', 100000)}"
-        return subprocess.check_output(cmd, shell=True, text=True)
-
-
 class EditFileTool(SafeTool):
     def name(self):
         return "edit_file"
@@ -469,35 +432,33 @@ class EditFileTool(SafeTool):
         return f"Edited {path} (via Python)"
 
 
-class ShellEditFileTool(SafeTool):
+class ReflectionShellTool(SafeTool):
+    def __init__(self, config: ReflectionToolConfig):
+        self.config = config
+
     def name(self):
-        return "shell_edit_file"
+        return self.config.name
 
     def description(self):
-        return "Edit a file with search/replace using Linux tools (perl)."
+        return self.config.description
 
     def schema(self):
-        return {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}
+        return self.config.schema_dict
 
     def read_only(self):
-        return False
+        return self.config.read_only
 
     def __call__(self, ctx, args):
-        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+        if self.config.read_only == False and hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args.get("path", "")):
             return "Error: Permission denied by user."
 
-        path = Path(args["path"]).resolve()
-        env = {"OLD_TEXT": args["old_text"], "NEW_TEXT": args["new_text"]}
-        cmd = r"perl -i -pe 'BEGIN{undef $/;} s/\Q$ENV{OLD_TEXT}\E/$ENV{NEW_TEXT}/' " + f"'{path}'"
-        subprocess.check_call(cmd, shell=True, env=env)
-        return f"Edited {path} (via Perl)"
+        full_cmd = self.config.command.format(**args)
+        try:
+            result = subprocess.check_output(full_cmd, shell=True, text=True, stderr=subprocess.STDOUT)
+            return result
+        except subprocess.CalledProcessError as e:
+            return f"Error executing {self.config.name}: {e.output}"
 
-
-class MultiEditTool(SafeTool):
-    def name(self):
-        return "multi_edit"
-
-    def description(self):
         return "Apply multiple edits to a file atomically."
 
     def schema(self):
@@ -904,7 +865,7 @@ class Registry:
         return tool.execute(ctx, args)
 
 
-ALL_TOOLS = [ReadFileTool, ShellReadFileTool, WriteFileTool, ShellWriteFileTool, EditFileTool, ShellEditFileTool, MultiEditTool, BashTool, GrepTool, GlobTool, LsTool, WebFetchTool, AskTool, TodoWriteTool, WebSearchTool]
+ALL_TOOLS = [ReadFileTool, WriteFileTool, EditFileTool, BashTool, GrepTool, GlobTool, LsTool, WebFetchTool, AskTool, TodoWriteTool, WebSearchTool]
 
 
 def should_enable(tool_name: str, enabled_list: List[str]) -> bool:
@@ -918,15 +879,21 @@ def register_all_builtins(reg: Registry, cfg: Config, root: str, proxy=None) -> 
         if not should_enable(name, enabled):
             continue
 
-        if sys.platform == "win32" and name in ["shell_read_file", "shell_edit_file", "shell_write_file"]:
-            continue
-
         if cls is BashTool:
             reg.add(cls(prefer=cfg.tools.shell.prefer, path=cfg.tools.shell.path, timeout=cfg.tools.bash_timeout_seconds))
         elif cls is WebFetchTool:
             reg.add(cls(proxy=proxy))
         else:
             reg.add(cls())
+
+    for rcfg in cfg.tools.reflection_tools:
+        if not should_enable(rcfg.name, enabled):
+            continue
+        if rcfg.platform:
+            allowed = [p.strip() for p in rcfg.platform.split(",")]
+            if sys.platform not in allowed:
+                continue
+        reg.add(ReflectionShellTool(rcfg))
 
 
 # =============================================================================
@@ -1213,11 +1180,6 @@ class Controller:
     # ------------------------------------------------------------------
 
     def _compose(self, text: str) -> str:
-        """Prepend PlanModeMarker when plan mode is active.
-
-        Mirrors Harness control.Controller.Compose: the marker rides the user
-        message so the cache-stable system prefix is never modified.
-        """
         if self._plan_mode:
             return self.cfg.plan_mode_marker + "\n\n" + text
         return text

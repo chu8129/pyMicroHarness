@@ -1231,9 +1231,6 @@ class Controller:
                 self.context.compact(max_tokens=self.provider.entry.context_window, force=False)
                 messages = self.context.to_openai()
                 tools = self.registry.schemas()
-                if not self.provider:
-                    return "Error: no provider"
-                # KeyboardInterrupt propagates upward to be handled by the CLI layer.
                 try:
                     response = self.provider.chat(messages, tools, self.cfg.agent.temperature)
                 except KeyboardInterrupt:
@@ -1274,7 +1271,7 @@ class Controller:
 
                         def format_args(args_dict):
                             try:
-                                # Recursively truncate strings in dictionary
+
                                 def truncate(v):
                                     if isinstance(v, str) and len(v) > 50:
                                         return v[:47] + "..."

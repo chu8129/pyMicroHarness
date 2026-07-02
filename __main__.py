@@ -1320,7 +1320,6 @@ class Controller:
         composed = self._compose(user_request)
 
         if not self._plan_mode:
-            # Normal (non-plan) execution path.
             return self._run_turn(composed)
 
         # ── Plan mode: research / planning turn ───────────────────────────────
@@ -1329,17 +1328,12 @@ class Controller:
         if not proposal or not proposal.strip():
             return "(plan mode: no proposal generated)"
 
-        # ── Approval gate ─────────────────────────────────────────────────────
         approved = self._request_plan_approval(proposal)
-
         if not approved:
-            # Keep plan mode on so the user can refine and re-submit.
             return "Plan rejected. Plan mode is still active. Send revised instructions."
 
         # ── Approved: exit plan mode and execute ──────────────────────────────
         _stdout("\n\u2705 Plan approved \u2014 executing...")
-
-        # Execute any pending writes queued during plan mode
         pending = getattr(self.context, "pending_writes", [])
         if pending:
             _stdout(f"\n\u2699 Executing {len(pending)} queued write operations...")
@@ -1349,7 +1343,6 @@ class Controller:
 
         self.set_plan_mode(False)
 
-        # Seed a starter todo list from the plan (mirrors seedPlanTodos).
         todos = parse_plan_todos(proposal)
         if todos and self.context is not None:
             self.context.todos = todos

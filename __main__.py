@@ -1397,6 +1397,9 @@ SYNOPSIS
   Harness Kernel [options] [request]
 
 COMMANDS
+  /skills           List available skills
+  /tools            List available tools
+  /info             Display system status and help
   /new              Start a new conversation (automatically saves current session)
   /clear            Same as /new, clears conversation context
   /model            List all available providers
@@ -1503,6 +1506,10 @@ def main(argv=None) -> None:
     def _cmd_tools(req):
         _stdout("Available tools:\n" + "\n".join([f"  {t.name()}" for t in ctrl.registry.list()]))
 
+    def _cmd_info(req):
+        ctrl.boot()
+        print_help()
+
     def _cmd_plan(req):
         parts = req.split(None, 1)
         sub = parts[1].strip().lower() if len(parts) > 1 else None
@@ -1535,6 +1542,7 @@ def main(argv=None) -> None:
         "/context": _cmd_context,
         "/skills": _cmd_skills,
         "/tools": _cmd_tools,
+        "/info": _cmd_info,
     }
     # Prefix-match commands (checked in order)
     PREFIX_COMMANDS = [

@@ -306,7 +306,6 @@ tools:
         required: [path, content]
 
 skills:
-  enabled: []                          # Enabled skills (empty=all)
   # ============================================
   # 1. explore - Codebase Exploration (Read-only subagent)
   # ============================================

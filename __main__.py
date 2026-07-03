@@ -111,8 +111,7 @@ class ToolsConfig(BaseModel):
     bash_timeout_seconds: int = 120
 
 
-class SkillsConfig(BaseModel):
-    enabled: List[str] = Field(default_factory=list)
+
 
 
 class SandboxConfig(BaseModel):
@@ -156,7 +155,7 @@ class Config(BaseModel):
     providers: List[ProviderEntry] = Field(default_factory=list)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
-    skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    skills: List[dict] = Field(default_factory=list)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     plan_mode_marker: str = ""
     plan_approved_message: str = ""
@@ -165,10 +164,6 @@ class Config(BaseModel):
     def load_for_root(cls, workspace_root: str) -> Config:
         """Load config from YAML with resolution: project > user > defaults."""
         cfg = Config()
-
-        user_config = Path.home() / ".reasonix" / "config.yaml"
-        if user_config.exists():
-            cfg = cfg._merge_yaml(user_config)
 
         project_config = Path(workspace_root) / "config.yaml"
         if project_config.exists():
@@ -248,9 +243,7 @@ class Config(BaseModel):
         return None
 
     def enabled_skills(self) -> List[SkillEntry]:
-        if not self.skills.enabled:
-            return self.skills_data
-        return [s for s in self.skills_data if s.name in self.skills.enabled]
+        return self.skills_data
 
 
 # =============================================================================
@@ -1597,7 +1590,6 @@ def main(argv=None) -> None:
 Config.model_rebuild()
 AgentConfig.model_rebuild()
 ToolsConfig.model_rebuild()
-SkillsConfig.model_rebuild()
 
 SandboxConfig.model_rebuild()
 ShellConfig.model_rebuild()

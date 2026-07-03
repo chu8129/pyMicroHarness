@@ -50,6 +50,7 @@ providers:
     request_timeout: 60
     retry_time: 5
     delay: 2
+    default: true
 
   - name: mota
     kind: openai
@@ -70,7 +71,6 @@ providers:
     request_timeout: 60
     retry_time: 5
     delay: 2
-    default: true
 
 agent:
   # system_prompt supports two formats:
@@ -235,12 +235,6 @@ agent:
 skills:
   enabled: []                          # Enabled skills (empty=all)
 
-permissions:
-  allow_write: true                    # Allow file writes
-  allow_bash: true                     # Allow shell commands
-  allow_web_fetch: true                # Allow web requests
-  auto_approve: false                  # Auto-approve operations
-
 sandbox:
   enabled: false                       # Enable sandbox
   allowed_paths: []                    # Allowed paths
@@ -277,7 +271,7 @@ tools:
   bash_timeout_seconds: 120            # Bash command timeout (s)
   reflection_tools:
     - name: shell_read_file
-      description: Read a file's contents using Linux tools (sed/head).
+      description: Read a file's contents using Linux tools (sed | head -c max_chars).
       command: sed -n '{start_line},{end_line}p' '{path}' | head -c {max_chars}
       read_only: true
       platform: linux,darwin

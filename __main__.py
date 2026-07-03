@@ -115,13 +115,6 @@ class SkillsConfig(BaseModel):
     enabled: List[str] = Field(default_factory=list)
 
 
-class PermissionsConfig(BaseModel):
-    allow_write: bool = True
-    allow_bash: bool = True
-    allow_web_fetch: bool = True
-    auto_approve: bool = False
-
-
 class SandboxConfig(BaseModel):
     enabled: bool = False
     allowed_paths: List[str] = Field(default_factory=list)
@@ -164,7 +157,6 @@ class Config(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
-    permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     plan_mode_marker: str = ""
     plan_approved_message: str = ""
@@ -1609,7 +1601,7 @@ Config.model_rebuild()
 AgentConfig.model_rebuild()
 ToolsConfig.model_rebuild()
 SkillsConfig.model_rebuild()
-PermissionsConfig.model_rebuild()
+
 SandboxConfig.model_rebuild()
 ShellConfig.model_rebuild()
 ProviderEntry.model_rebuild()

@@ -174,12 +174,9 @@ class Config(BaseModel):
         if project_config.exists():
             cfg = cfg._merge_yaml(project_config)
 
-        skills_yaml = Path(workspace_root) / "skills.yaml"
         all_skills = []
-        if skills_yaml.exists():
-            with open(skills_yaml, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-                all_skills.extend([SkillEntry.model_validate(s) for s in data.get("skills", [])])
+        if cfg.skills:
+            all_skills.extend([SkillEntry.model_validate(s) for s in cfg.skills])
 
         skills_dir = Path(workspace_root) / "skills"
         if skills_dir.exists():

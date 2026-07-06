@@ -111,9 +111,6 @@ class ToolsConfig(BaseModel):
     bash_timeout_seconds: int = 120
 
 
-
-
-
 class SandboxConfig(BaseModel):
     enabled: bool = False
     allowed_paths: List[str] = Field(default_factory=list)
@@ -165,9 +162,14 @@ class Config(BaseModel):
         """Load config from YAML with resolution: project > user > defaults."""
         cfg = Config()
 
-        project_config = Path(workspace_root) / "config.yaml"
+        # 优先读取当前目录，不存在则读取全局配置
+        project_config = Path("config.yaml")
+        global_config = Path.home() / ".config" / "harness" / "config.yaml"
+
         if project_config.exists():
             cfg = cfg._merge_yaml(project_config)
+        elif global_config.exists():
+            cfg = cfg._merge_yaml(global_config)
 
         all_skills = []
         if cfg.skills:

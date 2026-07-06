@@ -655,7 +655,9 @@ class AskTool(SafeTool):
         if not sys.stdin.isatty():
             return "<model-assumption> Proceeding with default."
         try:
-            choice = input("Your choice: ")
+            choice = input("Your choice (default: Yes): ").strip()
+            if not choice:
+                return "Yes"
             logger.info(f"User chose: {choice}")
             return choice
         except EOFError:

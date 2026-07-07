@@ -381,7 +381,7 @@ class WriteFileTool(SafeTool):
         return False
 
     async def __call__(self, ctx, args):
-        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+        if not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
 
         path = Path(args["path"]).resolve()
@@ -440,7 +440,7 @@ class EditFileTool(SafeTool):
         return False
 
     async def __call__(self, ctx, args):
-        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+        if not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
 
         path = Path(args["path"]).resolve()
@@ -468,7 +468,7 @@ class ReflectionShellTool(SafeTool):
         return self.config.read_only
 
     async def __call__(self, ctx, args):
-        if self.config.read_only == False and hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args.get("path", "")):
+        if self.config.read_only == False and not ctx.perm_manager.check_and_request_permission(ctx, args.get("path", "")):
             return "Error: Permission denied by user."
 
         full_cmd = self.config.command.format(**args)
@@ -490,7 +490,7 @@ class ReflectionShellTool(SafeTool):
         edit_tool = EditFileTool()
         results = []
         for edit in args["edits"]:
-            res = edit_tool(ctx, {"path": args["path"], "old_text": edit["old_text"], "new_text": edit["new_text"]})
+            res = await edit_tool(ctx, {"path": args["path"], "old_text": edit["old_text"], "new_text": edit["new_text"]})
             results.append(res)
             if res.startswith("Error"):
                 return f"Multi-edit failed: {res}"
@@ -996,9 +996,10 @@ class Message:
 
 
 class Context:
-    def __init__(self, system_prompt: str, cfg: AgentConfig):
+    def __init__(self, system_prompt: str, cfg: AgentConfig, perm_manager: Any = None):
         self.system_prompt = system_prompt
         self.cfg = cfg
+        self.perm_manager = perm_manager
         self.messages: List[Message] = []
         self.todos: List[dict] = []
 
@@ -1317,7 +1318,7 @@ class Controller:
 
     def reset_context(self) -> None:
         system_prompt = self.cfg.resolve_system_prompt(self.root)
-        self.context = Context(system_prompt, self.cfg.agent)
+        self.context = Context(system_prompt, self.cfg.agent, self.perm_manager)
         self.step_count = 0
 
     async def _register_mcp_tools(self):
@@ -1336,7 +1337,7 @@ class Controller:
         default = next((p for p in self.cfg.providers if p.default), self.cfg.providers[0])
         self.provider = Provider(default)
         system_prompt = self.cfg.resolve_system_prompt(self.root)
-        self.context = Context(system_prompt, self.cfg.agent)
+        self.context = Context(system_prompt, self.cfg.agent, self.perm_manager)
 
         _cmd = " ".join(getattr(sys, "orig_argv", sys.argv))
         system_info = f"\nSystem Info: Platform={sys.platform}, Python={sys.version.split()[0]}"

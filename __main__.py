@@ -36,6 +36,7 @@ import re
 import glob
 import subprocess
 import signal
+import asyncio
 
 if sys.platform != "win32":
     import readline
@@ -107,7 +108,7 @@ class ReflectionToolConfig(BaseModel):
     command: str
     read_only: bool = True
     schema_dict: dict = Field(alias="schema", default_factory=dict)
-    platform: Optional[str] = None  # 支持逗号分隔的平台列表，如 "linux,darwin"
+    platform: Optional[str] = None
 
 
 class ToolsConfig(BaseModel):
@@ -168,7 +169,6 @@ class Config(BaseModel):
         """Load config from YAML with resolution: project > user > defaults."""
         cfg = Config()
 
-        # 优先读取当前目录，不存在则读取全局配置
         project_config = Path("config.yaml")
         global_config = Path.home() / ".config" / "harness" / "config.yaml"
 
@@ -300,6 +300,36 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+# =============================================================================
+# Shared async HTTP client pool (concurrency-limited)
+# =============================================================================
+
+_http_pool: "httpx.AsyncClient | None" = None
+_HTTP_MAX_CONCURRENCY = 10  # httpx.Limits 控制最大并发连接数
+
+
+async def get_http_client() -> "httpx.AsyncClient":
+    """获取全局共享的 httpx.AsyncClient（懒初始化，连接池复用）"""
+    global _http_pool
+    if _http_pool is None:
+        import httpx
+
+        _http_pool = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10, read=30, write=10, pool=10),
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=_HTTP_MAX_CONCURRENCY, max_keepalive_connections=5),
+        )
+    return _http_pool
+
+
+async def close_http_pool():
+    """关闭全局 HTTP 连接池（程序退出时调用）"""
+    global _http_pool
+    if _http_pool is not None:
+        await _http_pool.aclose()
+        _http_pool = None
+
+
 class Tool(ABC):
     @abstractmethod
     def name(self) -> str: ...
@@ -308,7 +338,7 @@ class Tool(ABC):
     @abstractmethod
     def schema(self) -> dict: ...
     @abstractmethod
-    def execute(self, ctx: Any, args: dict) -> str: ...
+    async def execute(self, ctx: Any, args: dict) -> str: ...
     @abstractmethod
     def read_only(self) -> bool: ...
 
@@ -326,15 +356,15 @@ class Tool(ABC):
 class SafeTool(Tool, ABC):
     """Base class for tools that wraps execution in a robust error handler."""
 
-    def execute(self, ctx: Any, args: dict) -> str:
+    async def execute(self, ctx: Any, args: dict) -> str:
         try:
-            return self(ctx, args)
+            return await self(ctx, args)
         except Exception as e:
             logger.exception(f"Tool {self.name()} execution failed")
             return f"Error: Tool execution failed - {str(e)}"
 
     @abstractmethod
-    def __call__(self, ctx: Any, args: dict) -> str: ...
+    async def __call__(self, ctx: Any, args: dict) -> str: ...
 
 
 class WriteFileTool(SafeTool):
@@ -350,7 +380,7 @@ class WriteFileTool(SafeTool):
     def read_only(self):
         return False
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
 
@@ -373,7 +403,7 @@ class ReadFileTool(SafeTool):
     def read_only(self):
         return True
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         path = Path(args["path"]).resolve()
         if not path.exists():
             return f"Error: File not found: {path}"
@@ -409,7 +439,7 @@ class EditFileTool(SafeTool):
     def read_only(self):
         return False
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
 
@@ -437,7 +467,7 @@ class ReflectionShellTool(SafeTool):
     def read_only(self):
         return self.config.read_only
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         if self.config.read_only == False and hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args.get("path", "")):
             return "Error: Permission denied by user."
 
@@ -456,7 +486,7 @@ class ReflectionShellTool(SafeTool):
     def read_only(self):
         return False
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         edit_tool = EditFileTool()
         results = []
         for edit in args["edits"]:
@@ -489,13 +519,13 @@ class BashTool(SafeTool):
         lines = [line for line in command.splitlines() if line.strip() and not line.strip().startswith("#")]
         return "\n".join(lines)
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         command = self._clean_command(args["command"])
 
         for pattern in self.allowed_patterns:
             if re.search(pattern, command):
                 logger.info(f"Bash command matched allowed pattern: {pattern}")
-                return self._execute(command)
+                return await self._execute(command)
 
         cmd_base = command.split("\n")[0].split()[0]
         suggestions = [rf"^{re.escape(cmd_base)}\s*.*"]
@@ -512,37 +542,37 @@ class BashTool(SafeTool):
         if choice == "Deny" or choice == "Cancelled":
             return "Execution denied by user."
         elif choice == "Run once":
-            return self._execute(command)
+            return await self._execute(command)
         elif choice in suggestions:
             self.allowed_patterns.append(choice)
             logger.info(f"Allowed pattern added: {choice}")
-            return self._execute(command)
+            return await self._execute(command)
 
         return f"Execution denied: Unrecognized choice '{choice}'."
 
-    def _execute(self, command):
-        proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", executable=self.path or None)
+    async def _execute(self, command):
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            executable=self.path or None,
+        )
         self.active_processes.append(proc)
         try:
-            stdout, stderr = proc.communicate(timeout=self.timeout)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
             if proc in self.active_processes:
                 self.active_processes.remove(proc)
-            out = stdout
+            out = stdout.decode(errors="replace") if stdout else ""
             if proc.returncode != 0:
-                logger.error(f"Bash command failed: {command}\n{stderr}")
-                out += f"\n[exit {proc.returncode}]\n{stderr}"
+                err = stderr.decode(errors="replace") if stderr else ""
+                logger.error(f"Bash command failed: {command}\n{err}")
+                out += f"\n[exit {proc.returncode}]\n{err}"
             return out or "(no output)"
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
             proc.kill()
             if proc in self.active_processes:
                 self.active_processes.remove(proc)
             return f"Command timed out after {self.timeout}s"
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            if proc in self.active_processes:
-                self.active_processes.remove(proc)
-            logger.error(f"Bash command timed out: {args['command']}")
-            return f"Error: timed out after {self.timeout}s"
         except KeyboardInterrupt:
             proc.kill()
             if proc in self.active_processes:
@@ -571,7 +601,7 @@ class GrepTool(SafeTool):
     def read_only(self):
         return True
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         pattern, path = args["pattern"], Path(args["path"])
         rx = re.compile(pattern)
         files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
@@ -602,7 +632,7 @@ class GlobTool(SafeTool):
     def read_only(self):
         return True
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         return "\n".join(glob.glob(args["pattern"], recursive=True)) or "(no matches)"
 
 
@@ -619,7 +649,7 @@ class LsTool(SafeTool):
     def read_only(self):
         return True
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         p = Path(args["path"])
         if not p.exists():
             return f"Error: not found {p}"
@@ -649,7 +679,9 @@ class WebFetchTool(SafeTool):
         except:
             return False
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
+        import httpx
+
         url = args["url"]
         headers = args.get("headers", {})
         if "User-Agent" not in headers:
@@ -662,16 +694,13 @@ class WebFetchTool(SafeTool):
         if not self._is_safe_ip(ip):
             return f"Error: Security policy violation - cannot fetch internal address {ip}"
 
-        req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = resp.read()
-                try:
-                    return data.decode("utf-8")
-                except UnicodeDecodeError:
-                    return data.decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as e:
-            return f"Error: Tool execution failed - HTTP Error {e.code}: {e.reason}"
+            client = await get_http_client()
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            return resp.text
+        except httpx.HTTPStatusError as e:
+            return f"Error: Tool execution failed - HTTP Error {e.response.status_code}: {e.response.reason_phrase}"
         except Exception as e:
             raise RuntimeError(f"Error: Tool execution failed - {str(e)}")
 
@@ -714,7 +743,7 @@ class AskTool(SafeTool):
             logger.exception(f"Tool {self.name()} execution failed")
             return f"Error: Tool execution failed - {str(e)}"
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         return self.execute(ctx, args)
 
 
@@ -731,7 +760,7 @@ class TodoWriteTool(SafeTool):
     def read_only(self):
         return False
 
-    def __call__(self, ctx, args):
+    async def __call__(self, ctx, args):
         target = ctx.context if hasattr(ctx, "context") else ctx
         if hasattr(target, "todos"):
             target.todos = args["todos"]
@@ -753,8 +782,8 @@ class WebSearchTool(SafeTool):
     def read_only(self):
         return True
 
-    def __call__(self, ctx, args):
-        import requests
+    async def __call__(self, ctx, args):
+        import httpx
         from bs4 import BeautifulSoup
 
         query, engine = args["query"], args.get("engine", "duckduckgo")
@@ -766,10 +795,11 @@ class WebSearchTool(SafeTool):
         url, params, selector = configs[engine]
         headers = {"User-Agent": "Mozilla/5.0"}
 
+        client = await get_http_client()
         if engine == "duckduckgo":
-            response = requests.post(url, data=params, headers=headers)
+            response = await client.post(url, data=params, headers=headers)
         else:
-            response = requests.get(url, params=params, headers=headers)
+            response = await client.get(url, params=params, headers=headers)
 
         soup = BeautifulSoup(response.text, "html.parser")
         results = [res.get_text(separator=" ", strip=True) for res in soup.select(selector)]
@@ -884,7 +914,7 @@ class Registry:
     def schemas(self) -> List[dict]:
         return [t.to_dict() for t in self._tools.values()]
 
-    def execute_gated(self, name: str, ctx: Any, args: dict) -> str:
+    async def execute_gated(self, name: str, ctx: Any, args: dict) -> str:
         tool = self.get(name)
         if tool is None:
             return f"Error: tool '{name}' not found"
@@ -895,7 +925,7 @@ class Registry:
         missing = [p for p in required if p not in args]
         if missing:
             return f"Error: tool '{name}' missing required parameters: {', '.join(missing)}"
-        return tool.execute(ctx, args)
+        return await tool.execute(ctx, args)
 
 
 ALL_TOOLS = [ReadFileTool, WriteFileTool, EditFileTool, BashTool, GrepTool, GlobTool, LsTool, WebFetchTool, AskTool, TodoWriteTool, WebSearchTool]
@@ -1047,59 +1077,50 @@ class Provider:
         self.entry = entry
         self.api_key = os.environ.get(entry.api_key_env, "") or entry.api_key_env
 
-    def chat(self, messages: List[dict], tools: List[dict], temperature: float = 0.0) -> dict:
-        """Send request to LLM using litellm (supporting OpenAI/Gemini/Anthropic, etc.)."""
-        from litellm import completion, exceptions
-        import time
-        from concurrent.futures import ThreadPoolExecutor
+    async def chat(self, messages: List[dict], tools: List[dict], temperature: float = 0.0) -> dict:
+        """Send request to LLM using litellm async (supporting OpenAI/Gemini/Anthropic, etc.)."""
+        from litellm import acompletion, exceptions
 
         # Apply delay if configured
         if self.entry.delay_seconds > 0:
             logger.info(f"Delaying {self.entry.delay_seconds}s before request...")
-            time.sleep(self.entry.delay_seconds)
+            await asyncio.sleep(self.entry.delay_seconds)
 
-        def _call():
-            model = self.entry.model
-            # Use config 'kind' as litellm provider prefix when base_url is set
-            # e.g. kind=openai -> "openai/model-name" routes via OpenAI protocol
-            kind = self.entry.kind
-            if self.entry.base_url and kind and not model.startswith(f"{kind}/"):
-                model = f"{kind}/{model}"
+        model = self.entry.model
+        kind = self.entry.kind
+        if self.entry.base_url and kind and not model.startswith(f"{kind}/"):
+            model = f"{kind}/{model}"
 
-            kwargs = {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-                "timeout": self.entry.request_timeout,
-                "api_key": self.api_key,
-            }
-            if tools:
-                kwargs["tools"] = tools
-                kwargs["tool_choice"] = "auto"
-            if self.entry.base_url:
-                kwargs["api_base"] = self.entry.base_url
-            return completion(**kwargs)
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "timeout": self.entry.request_timeout,
+            "api_key": self.api_key,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        if self.entry.base_url:
+            kwargs["api_base"] = self.entry.base_url
 
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_call)
-            try:
-                response = future.result()
-            except KeyboardInterrupt:
-                future.cancel()
-                logger.warning("LLM call interrupted by user.")
-                return {"content": "(Interrupted by user)", "tool_calls": [], "finish_reason": "interrupted"}
-            except exceptions.RateLimitError as e:
-                logger.error(f"Rate limit exceeded: {e}")
-                return {"content": "Error: API Rate Limit Exceeded. Please wait a moment and try again.", "tool_calls": [], "finish_reason": "error"}
-            except exceptions.AuthenticationError as e:
-                logger.error(f"Authentication failed: {e}")
-                return {"content": "Error: Authentication failed. Check your API key.", "tool_calls": [], "finish_reason": "error"}
-            except exceptions.ServiceUnavailableError as e:
-                logger.error(f"Service Unavailable: {e}")
-                return {"content": "Error: Service is currently unavailable (e.g. high load). Please try again in a few moments.", "tool_calls": [], "finish_reason": "error"}
-            except Exception as e:
-                logger.error(f"LLM call error: {e}")
-                return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error"}
+        try:
+            response = await acompletion(**kwargs)
+        except KeyboardInterrupt:
+            logger.warning("LLM call interrupted by user.")
+            return {"content": "(Interrupted by user)", "tool_calls": [], "finish_reason": "interrupted"}
+        except exceptions.RateLimitError as e:
+            logger.error(f"Rate limit exceeded: {e}")
+            return {"content": "Error: API Rate Limit Exceeded. Please wait a moment and try again.", "tool_calls": [], "finish_reason": "error"}
+        except exceptions.AuthenticationError as e:
+            logger.error(f"Authentication failed: {e}")
+            return {"content": "Error: Authentication failed. Check your API key.", "tool_calls": [], "finish_reason": "error"}
+        except exceptions.ServiceUnavailableError as e:
+            logger.error(f"Service Unavailable: {e}")
+            return {"content": "Error: Service is currently unavailable (e.g. high load). Please try again in a few moments.", "tool_calls": [], "finish_reason": "error"}
+        except Exception as e:
+            logger.error(f"LLM call error: {e}")
+            return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error"}
 
         choice = response.choices[0]
         msg = choice.message
@@ -1114,7 +1135,6 @@ class Provider:
                 "input": usage.prompt_tokens,
                 "output": usage.completion_tokens,
             }
-            # Extract cache info
             cache_tokens = 0
             if hasattr(usage, "extra") and usage.extra is not None and "cache_hit_tokens" in usage.extra:
                 cache_tokens = usage.extra["cache_hit_tokens"]
@@ -1129,6 +1149,84 @@ class Provider:
 # =============================================================================
 # 6. Agent Controller
 # =============================================================================
+
+
+class _MCPRemoteTool(SafeTool):
+    """
+    代表一个 MCP 服务端暴露的单个远程工具。
+    - discover_all(): 类方法，连接服务端发现所有工具，返回实例列表
+    - __call__(): 每次调用时建立新连接执行 tools/call
+    """
+
+    def __init__(self, server_url: str, tool_name: str, tool_description: str, tool_schema: dict):
+        self._server_url = server_url
+        self._tool_name = tool_name
+        self._tool_description = tool_description
+        self._tool_schema = tool_schema
+
+    @classmethod
+    async def discover_all(cls, server_name: str, url: str) -> list:
+        """连接 MCP 服务端，发现所有工具，返回 _MCPRemoteTool 实例列表"""
+        from mcp import ClientSession
+        from mcp.client.sse import sse_client
+
+        tools = []
+        try:
+            async with sse_client(url) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.list_tools()
+                    for t in result.tools:
+                        tools.append(
+                            cls(
+                                server_url=url,
+                                tool_name=t.name,
+                                tool_description=t.description or f"MCP tool from {server_name}",
+                                tool_schema=t.inputSchema or {"type": "object", "properties": {}},
+                            )
+                        )
+            logger.info(f"MCP '{server_name}' → {len(tools)} tools: {[t._tool_name for t in tools]}")
+        except Exception as e:
+            logger.error(f"MCP Discovery failed for '{server_name}' ({url}): {e}")
+        return tools
+
+    def name(self) -> str:
+        return f"mcp_{self._tool_name}"
+
+    def description(self) -> str:
+        return self._tool_description
+
+    def schema(self) -> dict:
+        return self._tool_schema
+
+    def read_only(self) -> bool:
+        return True
+
+    async def __call__(self, ctx, args) -> str:
+        """直接 await 远程调用（整个 agent loop 已在 async 上下文中）"""
+        return await self._call_remote(args)
+
+    async def _call_remote(self, args: dict) -> str:
+        from mcp import ClientSession
+        from mcp.client.sse import sse_client
+
+        try:
+            async with sse_client(self._server_url) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(self._tool_name, arguments=args)
+                    parts = []
+                    for item in result.content:
+                        if hasattr(item, "text"):
+                            parts.append(item.text)
+                        elif hasattr(item, "data"):
+                            parts.append(str(item.data))
+                        else:
+                            parts.append(str(item))
+                    return "\n".join(parts) if parts else "(empty response)"
+        except Exception as e:
+            logger.error(f"MCP call failed: {self._tool_name} on {self._server_url}: {e}")
+            return f"Error: MCP tool call failed — {e}"
 
 
 class Controller:
@@ -1222,61 +1320,16 @@ class Controller:
         self.context = Context(system_prompt, self.cfg.agent)
         self.step_count = 0
 
-    def _register_mcp_tools(self):
-        for name, config in self.cfg.agent.mcp_servers.items():
-            logger.info(f"Registering MCP server: {name} at {config.url}")
+    async def _register_mcp_tools(self):
+        """连接所有配置的 MCP 服务端，发现并注册其暴露的工具。"""
+        tasks = [_MCPRemoteTool.discover_all(name, cfg.url) for name, cfg in self.cfg.agent.mcp_servers.items()]
+        all_results = await asyncio.gather(*tasks)
+        for tools in all_results:
+            for tool in tools:
+                self.registry.add(tool)
 
-            class MCPTool(SafeTool):
-                def __init__(self, name, url):
-                    self._name = name
-                    self.url = url
-                    self._description = f"MCP server: {url}"
-                    self._schema = {"type": "object", "properties": {}}
-                    self._tools_list = []
-                    self._fetch_capabilities()
-
-                def _fetch_capabilities(self):
-                    import asyncio
-                    from mcp import ClientSession
-                    from mcp.client.sse import sse_client
-
-                    async def run_discovery():
-                        async with sse_client(self.url) as (read, write):
-                            async with ClientSession(read, write) as session:
-                                await session.initialize()
-                                tools = await session.list_tools()
-                                return tools.tools
-
-                    try:
-                        self._tools_list = asyncio.run(run_discovery())
-                        if self._tools_list:
-                            # 简单起见，如果server提供了多个tool，我们默认取第一个或者后续完善映射逻辑
-                            t = self._tools_list[0]
-                            self._description = t.description
-                            self._schema = t.inputSchema
-                    except Exception as e:
-                        logger.error(f"MCP Discovery failed for {self._name}: {e}")
-
-                def name(self):
-                    return f"mcp_{self._name}"
-
-                def description(self):
-                    return self._description
-
-                def schema(self):
-                    return self._schema
-
-                def read_only(self):
-                    return True
-
-                def __call__(self, ctx, args):
-                    # 实际调用逻辑：这里也需要异步session
-                    return f"Connected to {self.url}. Tools found: {[t.name for t in self._tools_list]}"
-
-            self.registry.add(MCPTool(name, config.url))
-
-    def boot(self) -> None:
-        self._register_mcp_tools()
+    async def boot(self) -> None:
+        await self._register_mcp_tools()
         register_all_builtins(self.registry, self.cfg, self.root)
         if not self.cfg.providers:
             raise RuntimeError("No providers configured. Add at least one provider to config.yaml.")
@@ -1289,9 +1342,12 @@ class Controller:
         system_info = f"\nSystem Info: Platform={sys.platform}, Python={sys.version.split()[0]}"
         self.context.add_user(f"System initialized. Service started with command: `{_cmd}`{system_info}")
 
+        mcp_tools = [t.name() for t in self.registry.list() if t.name().startswith("mcp_")]
+        builtin_tools = [t.name() for t in self.registry.list() if not t.name().startswith("mcp_")]
+
         log_box(
             "boot",
-            f"Workspace: {self.root}\nTools: {[t.name() for t in self.registry.list()]}\nSkills: {[s.name for s in self.cfg.enabled_skills()]}\nProvider: {self.provider.entry.name}\nModel: {self.provider.entry.model}\nBase URL: {self.provider.entry.base_url}",
+            f"Workspace: {self.root}\nBuilt-in Tools: {builtin_tools}\nMCP Tools: {mcp_tools}\nSkills: {[s.name for s in self.cfg.enabled_skills()]}\nProvider: {self.provider.entry.name}\nModel: {self.provider.entry.model}\nBase URL: {self.provider.entry.base_url}",
         )
 
     # ------------------------------------------------------------------
@@ -1331,7 +1387,7 @@ class Controller:
                 return False
             _stdout("Please answer y (approve) or n (reject).")
 
-    def _run_turn(self, composed_input: str) -> str:
+    async def _run_turn(self, composed_input: str) -> str:
         """Run one model turn (tool loop) and return the last assistant text.
 
         Separated from run() so the plan approval flow can call it for the
@@ -1352,7 +1408,7 @@ class Controller:
                 messages = self.context.to_openai()
                 tools = self.registry.schemas()
                 try:
-                    response = self.provider.chat(messages, tools, self.cfg.agent.temperature)
+                    response = await self.provider.chat(messages, tools, self.cfg.agent.temperature)
                 except KeyboardInterrupt:
                     logger.warning("\nInterrupted by user during LLM call.")
                     raise
@@ -1393,7 +1449,7 @@ class Controller:
                             args = json.loads(fn.get("arguments", "{}")) if isinstance(fn.get("arguments"), str) else fn.get("arguments", {})
                         except json.JSONDecodeError:
                             args = {}
-                        result = self.registry.execute_gated(tname, self, args)
+                        result = await self.registry.execute_gated(tname, self, args)
                         self.context.add_tool_result(tname, tid, result)
 
                         def format_args(args_dict):
@@ -1426,7 +1482,7 @@ class Controller:
             return "(Interrupted by user)"
         return last_content or "(max_steps reached)"
 
-    def run(self, user_request: str) -> str:
+    async def run(self, user_request: str) -> str:
         """Run a user request, honouring plan mode.
 
         Plan-mode flow (mirrors Harness runTurnWithRawDisplay):
@@ -1438,16 +1494,16 @@ class Controller:
         Normal flow: just run the tool loop.
         """
         if self.context is None:
-            self.boot()
+            await self.boot()
 
         log_box("user", user_request[:500])
         composed = self._compose(user_request)
 
         if not self._plan_mode:
-            return self._run_turn(composed)
+            return await self._run_turn(composed)
 
         # ── Plan mode: research / planning turn ───────────────────────────────
-        proposal = self._run_turn(composed)
+        proposal = await self._run_turn(composed)
 
         if not proposal or not proposal.strip():
             return "(plan mode: no proposal generated)"
@@ -1457,13 +1513,13 @@ class Controller:
             return "Plan rejected. Plan mode is still active. Send revised instructions."
 
         # ── Approved: exit plan mode and execute ──────────────────────────────
-        _stdout("\n\u2705 Plan approved \u2014 executing...")
+        _stdout("\n✅ Plan approved — executing...")
         pending = getattr(self.context, "pending_writes", [])
         if pending:
-            _stdout(f"\n\u2699 Executing {len(pending)} queued write operations...")
+            _stdout(f"\n⚙ Executing {len(pending)} queued write operations...")
             for tool, args in pending:
                 _stdout(f"  Running {tool.name()} on {args.get('path', 'unknown')}...")
-                tool.execute(self, args)
+                await tool.execute(self, args)
 
         self.set_plan_mode(False)
 
@@ -1474,7 +1530,7 @@ class Controller:
             log_box("tool", f"todo_write (plan seed)\n{todo_log}")
 
         # Execution turn with plan-approved nudge (mirrors planApprovedMessage turn).
-        return self._run_turn(self.cfg.plan_approved_message)
+        return await self._run_turn(self.cfg.plan_approved_message)
 
 
 # =============================================================================
@@ -1515,7 +1571,8 @@ SYNOPSIS
 
 COMMANDS
   /skills           List available skills
-  /tools            List available tools
+  /tools            List available tools (built-in and MCP)
+  /mcp              List all connected MCP servers and their tools
   /info             Display system status and help
   /new              Start a new conversation (automatically saves current session)
   /clear            Same as /new, clears conversation context
@@ -1571,9 +1628,9 @@ def main(argv=None) -> None:
             log_box("boot", f"Resumed session: {sid_to_load}\nWorkspace: {ctrl.root}\nMessages: {len(ctrl.context.messages)}")
         else:
             logger.info(f"Session '{sid_to_load}' not found. Starting fresh.")
-            ctrl.boot()
+            asyncio.run(ctrl.boot())
     else:
-        ctrl.boot()
+        asyncio.run(ctrl.boot())
 
     initial_req = args.request
     if not initial_req:
@@ -1621,10 +1678,15 @@ def main(argv=None) -> None:
         _stdout("Available skills:\n" + "\n".join([f"/{s.name} — {s.description[:47] + '...' if len(s.description) > 50 else s.description}" for s in skills]))
 
     def _cmd_tools(req):
-        _stdout("Available tools:\n" + "\n".join([f"  {t.name()}" for t in ctrl.registry.list()]))
+        builtins = [t for t in ctrl.registry.list() if not t.name().startswith("mcp_")]
+        _stdout("Available built-in tools:\n" + "\n".join([f"  {t.name()}" for t in builtins]))
+
+    def _cmd_mcp(req):
+        mcp_tools = [t for t in ctrl.registry.list() if t.name().startswith("mcp_")]
+        _stdout("Available MCP tools:\n" + "\n".join([f"  {t.name()} — {t.description()}" for t in mcp_tools]))
 
     def _cmd_info(req):
-        ctrl.boot()
+        asyncio.run(ctrl.boot())
         print_help()
 
     def _cmd_plan(req):
@@ -1666,6 +1728,7 @@ def main(argv=None) -> None:
         "/context": _cmd_context,
         "/skills": _cmd_skills,
         "/tools": _cmd_tools,
+        "/mcp": _cmd_mcp,
         "/mcp": _cmd_mcp,
         "/info": _cmd_info,
     }
@@ -1720,7 +1783,7 @@ def main(argv=None) -> None:
                     _stdout(f"Triggering skill: {skill_name} with args: {skill_args}")
                     ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill directory: {skill.path}\n\nSkill definition:\n{skill.body}")
                     _stdout("")
-                    rich_print(ctrl.run("Proceed with this skill execution"))
+                    rich_print(asyncio.run(ctrl.run("Proceed with this skill execution")))
                     _stdout("")
                     handled = True
         if stop:
@@ -1734,7 +1797,7 @@ def main(argv=None) -> None:
         # Default: send to LLM
         try:
             _stdout("")
-            rich_print(ctrl.run(req))
+            rich_print(asyncio.run(ctrl.run(req)))
             _stdout("")
             if one_shot:
                 break
@@ -1742,6 +1805,7 @@ def main(argv=None) -> None:
             _stdout("\n\n⚠️  Cancelled (Ctrl+C). Exiting.")
             break
     sid = ctrl.save_session()
+    asyncio.run(close_http_pool())
     _stdout(f"\nSession saved. Resume with: --resume {sid}")
 
 

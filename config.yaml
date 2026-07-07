@@ -82,6 +82,10 @@ agent:
   # system_prompt supports two formats:
   #   1. Inline text (shown below)
   #   2. External file: system_prompt: "file:my_prompt.md"; Path is relative to this config or absolute
+  mcp_servers:
+    bing_cn_search:
+      type: sse
+      url: https://mcp.api-inference.modelscope.net/1d7637d7ca4045/sse
   system_prompt: |
     You are Harness, a coding agent focused on executing code tasks.
     Use the provided tools to read and write files and run shell commands.

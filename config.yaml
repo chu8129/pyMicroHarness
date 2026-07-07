@@ -18,6 +18,13 @@ providers:
     model: kimi-k2.6
     api_key_env: KIMI_API_KEY
     context_window: 32678
+
+  - name: openrouter
+    kind: openai
+    base_url: https://openrouter.ai/api/v1
+    model: tencent/hy3:free
+    api_key_env: OPENROUTER_API_KEY
+    context_window: 8192
     request_timeout: 60
     retry_time: 3
     delay: 0.3
@@ -43,7 +50,6 @@ providers:
     delay: 2
 
   - name: gemini2
-    kind: openai
     model: gemini/gemini-3.1-flash-lite
     api_key_env: GEMINI_API_KEY2
     context_window: 65536

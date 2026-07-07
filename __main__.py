@@ -1011,8 +1011,15 @@ class Provider:
             time.sleep(self.entry.delay_seconds)
 
         def _call():
+            model = self.entry.model
+            # Use config 'kind' as litellm provider prefix when base_url is set
+            # e.g. kind=openai -> "openai/model-name" routes via OpenAI protocol
+            kind = self.entry.kind
+            if self.entry.base_url and kind and not model.startswith(f"{kind}/"):
+                model = f"{kind}/{model}"
+
             kwargs = {
-                "model": self.entry.model,
+                "model": model,
                 "messages": messages,
                 "temperature": temperature,
                 "timeout": self.entry.request_timeout,

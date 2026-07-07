@@ -1058,7 +1058,24 @@ class Provider:
         tool_calls = []
         if msg.tool_calls:
             tool_calls = [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in msg.tool_calls]
-        return {"content": msg.content or "", "tool_calls": tool_calls, "finish_reason": choice.finish_reason or ""}
+
+        usage = response.usage
+        usage_data = {}
+        if usage:
+            usage_data = {
+                "input": usage.prompt_tokens,
+                "output": usage.completion_tokens,
+            }
+            # Extract cache info
+            cache_tokens = 0
+            if hasattr(usage, "extra") and usage.extra is not None and "cache_hit_tokens" in usage.extra:
+                cache_tokens = usage.extra["cache_hit_tokens"]
+            elif hasattr(usage, "cache_read_input_tokens") and usage.cache_read_input_tokens:
+                cache_tokens = usage.cache_read_input_tokens
+
+            usage_data["cache_rate"] = f"{(cache_tokens / usage.prompt_tokens * 100) if usage.prompt_tokens > 0 else 0:.1f}%"
+
+        return {"content": msg.content or "", "tool_calls": tool_calls, "finish_reason": choice.finish_reason or "", "usage_summary": json.dumps(usage_data)}
 
 
 # =============================================================================
@@ -1075,6 +1092,7 @@ class Controller:
         self.context: Optional[Context] = None
         self.step_count = 0
         self._plan_mode: bool = False
+        self.current_session_id: Optional[str] = None
 
     def set_plan_mode(self, on: bool) -> None:
         self._plan_mode = on
@@ -1093,9 +1111,14 @@ class Controller:
     def save_session(self) -> str:
         import time, hashlib
 
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        rand = hashlib.sha256(str(time.time()).encode()).hexdigest()[:6]
-        sid = f"{ts}_{rand}"
+        if self.current_session_id:
+            sid = self.current_session_id
+        else:
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            rand = hashlib.sha256(str(time.time()).encode()).hexdigest()[:6]
+            sid = f"{ts}_{rand}"
+            self.current_session_id = sid
+
         data = {
             "session_id": sid,
             "workspace_root": self.root,
@@ -1116,8 +1139,10 @@ class Controller:
         self.root = data.get("workspace_root", self.root)
         self.step_count = data.get("step_count", 0)
         ctx_data = data.get("context", {})
+        self.current_session_id = sid
         if ctx_data:
             self.context = Context.from_dict(ctx_data, self.cfg.agent)
+        return True
         return True
 
     def list_providers(self) -> List[str]:
@@ -1233,9 +1258,12 @@ class Controller:
                     sys.stdout.write(f"\n⚠️  LLM call failed after retries: {e}\n")
                     sys.stdout.flush()
                     return f"Error: LLM call failed — {e}"
+
                 content = response.get("content", "")
                 tool_calls = response.get("tool_calls", [])
                 finish = response.get("finish_reason", "")
+                usage_summary = response.get("usage_summary", "")
+
                 model_parts = []
                 if finish:
                     model_parts.append(f"[finish={finish}]")
@@ -1246,10 +1274,14 @@ class Controller:
                     model_parts.append(f"\u2192 tools: {', '.join(tc_names)}")
                     for tc in tool_calls:
                         model_parts.append(f"  └─ call: {tc.get('function', {}).get('name')}\n     args: {tc.get('function', {}).get('arguments')}")
+
                 if model_parts:
                     log_box("model", "\n".join(model_parts))
+
+                if usage_summary:
+                    console.print(f"[dim]{usage_summary}[/dim]")
+
                 self.context.add_assistant(content or "", tool_calls=tool_calls or None)
-                last_content = content or last_content
                 if tool_calls:
                     for tc in tool_calls:
                         tid = tc.get("id", "unknown")

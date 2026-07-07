@@ -363,6 +363,9 @@ class SafeTool(Tool, ABC):
             logger.exception(f"Tool {self.name()} execution failed")
             return f"Error: Tool execution failed - {str(e)}"
 
+    async def __call__(self, ctx, args):
+        return await self.execute(ctx, args)
+
     @abstractmethod
     async def __call__(self, ctx: Any, args: dict) -> str: ...
 
@@ -718,7 +721,7 @@ class AskTool(SafeTool):
     def read_only(self):
         return True
 
-    def execute(self, ctx: Any, args: dict) -> str:
+    async def __call__(self, ctx: Any, args: dict) -> str:
         _stdout(f"\n[ASK] {args.get('question')}")
         options = args.get("options", [])
         for i, opt in enumerate(options, 1):
@@ -742,9 +745,6 @@ class AskTool(SafeTool):
         except Exception as e:
             logger.exception(f"Tool {self.name()} execution failed")
             return f"Error: Tool execution failed - {str(e)}"
-
-    async def __call__(self, ctx, args):
-        return self.execute(ctx, args)
 
 
 class TodoWriteTool(SafeTool):

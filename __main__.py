@@ -465,6 +465,7 @@ class BashTool(SafeTool):
     def __init__(self, path="", timeout=120):
         self.path, self.timeout = path, timeout
         self.active_processes = []
+        self.allowed_patterns = []
 
     def name(self):
         return "bash"
@@ -479,12 +480,39 @@ class BashTool(SafeTool):
         return False
 
     def __call__(self, ctx, args):
-        logger.warning(f"BASH EXECUTION REQUESTED:\nCommand: {args['command']}")
-        confirm = input("Confirm execution? (y/yes): ").strip().lower()
-        if confirm not in ["y", "yes"]:
-            return "Execution denied by user."
+        command = args["command"]
 
-        proc = subprocess.Popen(args["command"], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", executable=self.path or None)
+        for pattern in self.allowed_patterns:
+            if re.search(pattern, command):
+                logger.info(f"Bash command matched allowed pattern: {pattern}")
+                return self._execute(command)
+
+        parts = command.split()
+        cmd_base = parts[0]
+        suggestions = [rf"^{re.escape(cmd_base)}\s*.*"]
+
+        ask_tool = AskTool()
+        display_options = [p.replace(r"\s*", " ") for p in suggestions] + ["Run once", "Deny"]
+        choice = ask_tool(ctx, {"question": f"Command requires approval: {command}. Choose a pattern to allow or an action:", "options": display_options})
+
+        if choice in display_options:
+            idx = display_options.index(choice)
+            if idx < len(suggestions):
+                choice = suggestions[idx]
+
+        if choice == "Deny" or choice == "Cancelled":
+            return "Execution denied by user."
+        elif choice == "Run once":
+            return self._execute(command)
+        elif choice in suggestions:
+            self.allowed_patterns.append(choice)
+            logger.info(f"Allowed pattern added: {choice}")
+            return self._execute(command)
+
+        return f"Execution denied: Unrecognized choice '{choice}'."
+
+    def _execute(self, command):
+        proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", executable=self.path or None)
         self.active_processes.append(proc)
         try:
             stdout, stderr = proc.communicate(timeout=self.timeout)
@@ -492,9 +520,14 @@ class BashTool(SafeTool):
                 self.active_processes.remove(proc)
             out = stdout
             if proc.returncode != 0:
-                logger.error(f"Bash command failed: {args['command']}\n{stderr}")
+                logger.error(f"Bash command failed: {command}\n{stderr}")
                 out += f"\n[exit {proc.returncode}]\n{stderr}"
             return out or "(no output)"
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            if proc in self.active_processes:
+                self.active_processes.remove(proc)
+            return f"Command timed out after {self.timeout}s"
         except subprocess.TimeoutExpired:
             proc.kill()
             if proc in self.active_processes:
@@ -658,6 +691,12 @@ class AskTool(SafeTool):
             choice = input("Your choice (default: Yes): ").strip()
             if not choice:
                 return "Yes"
+
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(options):
+                    choice = options[idx]
+
             logger.info(f"User chose: {choice}")
             return choice
         except EOFError:

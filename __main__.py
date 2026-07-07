@@ -75,6 +75,11 @@ def _stdout(msg: str):
     sys.stdout.flush()
 
 
+class MCPServerConfig(BaseModel):
+    type: str
+    url: str
+
+
 class AgentConfig(BaseModel):
     system_prompt: str = ""
     language_policy: str = ""
@@ -86,6 +91,7 @@ class AgentConfig(BaseModel):
     planner_model: str = ""
     subagent_model: str = ""
     subagent_models: Dict[str, str] = Field(default_factory=dict)
+    mcp_servers: Dict[str, MCPServerConfig] = Field(default_factory=dict)
     output_style: str = ""
     compact_ratio: float = 0.8
     compact_force_ratio: float = 0.9
@@ -479,16 +485,19 @@ class BashTool(SafeTool):
     def read_only(self):
         return False
 
+    def _clean_command(self, command: str) -> str:
+        lines = [line for line in command.splitlines() if line.strip() and not line.strip().startswith("#")]
+        return "\n".join(lines)
+
     def __call__(self, ctx, args):
-        command = args["command"]
+        command = self._clean_command(args["command"])
 
         for pattern in self.allowed_patterns:
             if re.search(pattern, command):
                 logger.info(f"Bash command matched allowed pattern: {pattern}")
                 return self._execute(command)
 
-        parts = command.split()
-        cmd_base = parts[0]
+        cmd_base = command.split("\n")[0].split()[0]
         suggestions = [rf"^{re.escape(cmd_base)}\s*.*"]
 
         ask_tool = AskTool()
@@ -1213,7 +1222,61 @@ class Controller:
         self.context = Context(system_prompt, self.cfg.agent)
         self.step_count = 0
 
+    def _register_mcp_tools(self):
+        for name, config in self.cfg.agent.mcp_servers.items():
+            logger.info(f"Registering MCP server: {name} at {config.url}")
+
+            class MCPTool(SafeTool):
+                def __init__(self, name, url):
+                    self._name = name
+                    self.url = url
+                    self._description = f"MCP server: {url}"
+                    self._schema = {"type": "object", "properties": {}}
+                    self._tools_list = []
+                    self._fetch_capabilities()
+
+                def _fetch_capabilities(self):
+                    import asyncio
+                    from mcp import ClientSession
+                    from mcp.client.sse import sse_client
+
+                    async def run_discovery():
+                        async with sse_client(self.url) as (read, write):
+                            async with ClientSession(read, write) as session:
+                                await session.initialize()
+                                tools = await session.list_tools()
+                                return tools.tools
+
+                    try:
+                        self._tools_list = asyncio.run(run_discovery())
+                        if self._tools_list:
+                            # 简单起见，如果server提供了多个tool，我们默认取第一个或者后续完善映射逻辑
+                            t = self._tools_list[0]
+                            self._description = t.description
+                            self._schema = t.inputSchema
+                    except Exception as e:
+                        logger.error(f"MCP Discovery failed for {self._name}: {e}")
+
+                def name(self):
+                    return f"mcp_{self._name}"
+
+                def description(self):
+                    return self._description
+
+                def schema(self):
+                    return self._schema
+
+                def read_only(self):
+                    return True
+
+                def __call__(self, ctx, args):
+                    # 实际调用逻辑：这里也需要异步session
+                    return f"Connected to {self.url}. Tools found: {[t.name for t in self._tools_list]}"
+
+            self.registry.add(MCPTool(name, config.url))
+
     def boot(self) -> None:
+        self._register_mcp_tools()
         register_all_builtins(self.registry, self.cfg, self.root)
         if not self.cfg.providers:
             raise RuntimeError("No providers configured. Add at least one provider to config.yaml.")
@@ -1277,7 +1340,7 @@ class Controller:
         tool call inside this turn too.
         """
         self.context.add_user(composed_input)
-        max_steps = self.cfg.agent.max_steps or 25
+        max_steps = self.cfg.agent.max_steps or 10**8
         last_content = ""
         try:
             for _ in range(max_steps):
@@ -1578,6 +1641,19 @@ def main(argv=None) -> None:
         else:
             _stdout(f"Unknown plan mode argument: {sub}. Use /plan [on/off/status]")
 
+    def _cmd_mcp(req):
+        if not ctrl.registry:
+            _stdout("No tools registered.")
+            return
+
+        mcp_tools = [t for t in ctrl.registry.list() if "mcp" in t.name().lower()]
+        if not mcp_tools:
+            _stdout("No MCP tools found.")
+        else:
+            _stdout("Available MCP tools:")
+            for t in mcp_tools:
+                _stdout(f"  {t.name()}: {t.description()}")
+
     # Exact-match commands
     COMMANDS = {
         "/help": _cmd_help,
@@ -1590,6 +1666,7 @@ def main(argv=None) -> None:
         "/context": _cmd_context,
         "/skills": _cmd_skills,
         "/tools": _cmd_tools,
+        "/mcp": _cmd_mcp,
         "/info": _cmd_info,
     }
     # Prefix-match commands (checked in order)

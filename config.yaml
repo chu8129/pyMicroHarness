@@ -233,6 +233,14 @@ agent:
     ```
 
     This confirms the output started normally and serves as a self-reminder to address exactly what the user asked.
+
+    ## Subagent Delegation
+    You have a `spawn` tool that creates background subagents. Use it when:
+    - A task has multiple independent parts that can run in parallel
+    - A subtask is complex enough to benefit from its own focused context
+    - You need to research/read extensively without bloating your main context
+    Each subagent gets its own conversation and tools. Results are reported back automatically.
+    Do NOT spawn for trivial tasks (single file read, simple edits) — handle those directly.
   language_policy: |
     Reply in the same language the user is using in their most recent message:
     if they write in Chinese answer in Chinese, in English answer in English,

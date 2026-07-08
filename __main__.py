@@ -354,6 +354,157 @@ class Tool(ABC):
         }
 
 
+# =============================================================================
+# Subagent Manager
+# =============================================================================
+
+import dataclasses
+import uuid as _uuid
+
+
+@dataclasses.dataclass
+class _SubagentTask:
+    """Tracks one running subagent."""
+
+    label: str
+    task: asyncio.Task
+    session_key: str
+
+
+class SubagentManager:
+    """Manages background subagent lifecycle: spawn, track, cancel."""
+
+    def __init__(self, *, max_concurrent: int = 4):
+        self.max_concurrent = max_concurrent
+        self._running: Dict[str, _SubagentTask] = {}
+
+    def get_running_count(self) -> int:
+        self._prune()
+        return len(self._running)
+
+    def get_running_count_by_session(self, session_key: str) -> int:
+        self._prune()
+        return sum(1 for t in self._running.values() if t.session_key == session_key)
+
+    def _prune(self):
+        for tid in [tid for tid, t in self._running.items() if t.task.done()]:
+            del self._running[tid]
+
+    async def spawn(
+        self,
+        *,
+        task_prompt: str,
+        label: str = "",
+        session_key: str = "",
+        parent_controller: Any,
+        pending_queue: "asyncio.Queue",
+    ) -> str:
+        """Spawn a subagent. Returns a status message for the LLM."""
+        self._prune()
+        if len(self._running) >= self.max_concurrent:
+            return f"Cannot spawn subagent: concurrency limit reached " f"({len(self._running)}/{self.max_concurrent} running). " f"Wait for a running subagent to complete before spawning."
+
+        task_id = _uuid.uuid4().hex[:12]
+        effective_label = label or task_prompt[:50]
+
+        async def _run_subagent():
+            """Run a full agent turn in an isolated context and push result back."""
+            try:
+                cfg = parent_controller.cfg
+                subagent_model_name = cfg.agent.subagent_model
+
+                if subagent_model_name:
+                    provider_entry = next(
+                        (p for p in cfg.providers if p.model == subagent_model_name or p.name == subagent_model_name),
+                        None,
+                    )
+                    assert provider_entry is not None, f"No provider found for subagent_model '{subagent_model_name}' in config.yaml providers"
+                else:
+                    provider_entry = parent_controller.provider.entry
+
+                system_prompt = cfg.resolve_system_prompt(parent_controller.root) + ("\n\nYou are a subagent spawned to handle a specific task. " "Complete the task thoroughly and report your results. " "Be concise but complete in your final answer.")
+
+                sub_context = Context(system_prompt, cfg.agent, parent_controller.perm_manager)
+                sub_context.add_user(task_prompt)
+                provider = Provider(provider_entry)
+
+                for _ in range(min(cfg.agent.max_steps or 30, 30)):
+                    response = await provider.chat(
+                        sub_context.to_openai(),
+                        parent_controller.registry.schemas(),
+                        cfg.agent.temperature,
+                    )
+
+                    content = response.get("content", "")
+                    tool_calls = response.get("tool_calls", [])
+                    finish = response.get("finish_reason", "")
+
+                    if finish in ("error", "interrupted"):
+                        return content or "(subagent error)"
+
+                    sub_context.add_assistant(content or "", tool_calls=tool_calls or None)
+
+                    if not tool_calls:
+                        return content or "(no response)"
+
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        tname = fn.get("name", "")
+                        if tname == "spawn":
+                            result = "Error: Subagents cannot spawn nested subagents."
+                        else:
+                            try:
+                                args = json.loads(fn.get("arguments", "{}")) if isinstance(fn.get("arguments"), str) else fn.get("arguments", {})
+                            except json.JSONDecodeError:
+                                args = {}
+                            result = await parent_controller.registry.execute_gated(tname, parent_controller, args)
+                        sub_context.add_tool_result(tname, tc.get("id", "unknown"), result)
+
+                    if finish == "stop":
+                        return content or ""
+
+                return "(subagent max_steps reached)"
+
+            except asyncio.CancelledError:
+                return "(subagent cancelled)"
+            except Exception as e:
+                logger.error(f"Subagent {task_id} failed: {e}")
+                return f"(subagent error: {e})"
+
+        async def _task_wrapper():
+            result = await _run_subagent()
+            await pending_queue.put({"task_id": task_id, "label": effective_label, "content": result})
+            logger.info(f"Subagent {task_id} completed.")
+
+        self._running[task_id] = _SubagentTask(
+            label=effective_label,
+            task=asyncio.create_task(_task_wrapper()),
+            session_key=session_key,
+        )
+
+        _stdout(f"  🚀 Subagent spawned: [{task_id}] {effective_label}")
+        return f"Subagent spawned (task_id={task_id}). " f"It will report results when done. You can continue with other work."
+
+    async def cancel_all(self) -> int:
+        """Cancel all running subagents. Returns count cancelled."""
+        self._prune()
+        count = sum(1 for st in self._running.values() if not st.task.done() and st.task.cancel())
+        self._running.clear()
+        return count
+
+    async def cancel_by_session(self, session_key: str) -> int:
+        """Cancel subagents for a specific session."""
+        self._prune()
+        to_cancel = [tid for tid, st in self._running.items() if st.session_key == session_key]
+        count = 0
+        for tid in to_cancel:
+            st = self._running.pop(tid)
+            if not st.task.done():
+                st.task.cancel()
+                count += 1
+        return count
+
+
 class SafeTool(Tool, ABC):
     """Base class for tools that wraps execution in a robust error handler."""
 
@@ -811,6 +962,44 @@ class WebSearchTool(SafeTool):
         return "\n---\n".join(results) if results else f"No results found for {engine}."
 
 
+class SpawnTool(SafeTool):
+    """Tool for the LLM to spawn background subagents."""
+
+    def __init__(self, manager: SubagentManager):
+        self._manager = manager
+
+    def name(self):
+        return "spawn"
+
+    def description(self):
+        return "Spawn a subagent to handle a task in the background. " "Use for complex or time-consuming tasks that can run independently. " "The subagent reports back when done. You can spawn multiple for parallel work."
+
+    def schema(self):
+        return {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "The task for the subagent. Be specific and include all necessary context."},
+                "label": {"type": "string", "description": "Optional short label for display."},
+            },
+            "required": ["task"],
+        }
+
+    def read_only(self):
+        return True
+
+    async def __call__(self, ctx, args):
+        assert hasattr(ctx, "subagent_manager") and ctx.subagent_manager is not None, "Subagent system not initialized"
+        assert hasattr(ctx, "_pending_queue") and ctx._pending_queue is not None, "Pending queue not available (subagents require async turn context)"
+
+        return await ctx.subagent_manager.spawn(
+            task_prompt=args["task"],
+            label=args.get("label", ""),
+            session_key=ctx.current_session_id or "default",
+            parent_controller=ctx,
+            pending_queue=ctx._pending_queue,
+        )
+
+
 # =============================================================================
 # Plan Mode support
 # =============================================================================
@@ -1240,6 +1429,9 @@ class Controller:
         self.step_count = 0
         self._plan_mode: bool = False
         self.current_session_id: Optional[str] = None
+        # Subagent support
+        self.subagent_manager: SubagentManager = SubagentManager(max_concurrent=4)
+        self._pending_queue: Optional[asyncio.Queue] = None
 
     def set_plan_mode(self, on: bool) -> None:
         self._plan_mode = on
@@ -1332,6 +1524,8 @@ class Controller:
     async def boot(self) -> None:
         await self._register_mcp_tools()
         register_all_builtins(self.registry, self.cfg, self.root)
+        # Register spawn tool for subagent support
+        self.registry.add(SpawnTool(self.subagent_manager))
         if not self.cfg.providers:
             raise RuntimeError("No providers configured. Add at least one provider to config.yaml.")
         default = next((p for p in self.cfg.providers if p.default), self.cfg.providers[0])
@@ -1395,12 +1589,26 @@ class Controller:
         follow-up execution turn without re-applying _compose. Uses
         registry.execute_gated so the plan-mode gate is enforced on every
         tool call inside this turn too.
+
+        Subagent integration: A pending queue is created for this turn.
+        Between tool iterations, completed subagent results are drained
+        and injected as user messages so the model can incorporate them.
         """
         self.context.add_user(composed_input)
         max_steps = self.cfg.agent.max_steps or 10**8
         last_content = ""
+
+        # Initialize pending queue for subagent result injection
+        self._pending_queue = asyncio.Queue()
+
         try:
             for _ in range(max_steps):
+                # --- Drain pending subagent results before each step ---
+                for inj in await self._drain_pending_queue():
+                    inject_text = f"[Subagent Result (task_id={inj['task_id']}, label={inj['label']})]\n{inj['content']}"
+                    self.context.add_user(inject_text)
+                    log_box("mcp", f"⬅ Subagent result: [{inj['task_id']}] {inj['label']}\n{inj['content'][:300]}")
+
                 self.step_count += 1
                 logger.info(f"--- Step {self.step_count} ---")
                 # Get max tokens for current provider
@@ -1478,13 +1686,40 @@ class Controller:
                         res_str = f"result:\n{result[:600]}"
                         log_box("tool", f"{call_str}\n{'-' * 36}\n{res_str}")
                 else:
+                    # No tool calls — if subagents still running, wait then re-loop
+                    if self.subagent_manager.get_running_count() > 0:
+                        _stdout("⏳ Waiting for running subagents to complete...")
+                        while self.subagent_manager.get_running_count() > 0:
+                            try:
+                                msg = await asyncio.wait_for(self._pending_queue.get(), timeout=300)
+                            except asyncio.TimeoutError:
+                                _stdout("⚠️  Timeout waiting for subagents.")
+                                break
+                            self.context.add_user(f"[Subagent Result (task_id={msg['task_id']}, label={msg['label']})]\n{msg['content']}")
+                            log_box("mcp", f"⬅ Subagent result: [{msg['task_id']}] {msg['label']}\n{msg['content'][:300]}")
+                        continue
                     return content or "(no response)"
                 if finish == "stop":
                     return content or "(stopped)"
         except KeyboardInterrupt:
             logger.warning("\nInterrupted by user. Context retained.")
+            await self.subagent_manager.cancel_all()
             return "(Interrupted by user)"
+        finally:
+            self._pending_queue = None
         return last_content or "(max_steps reached)"
+
+    async def _drain_pending_queue(self, limit: int = 5) -> List[dict]:
+        """Drain completed subagent results from the pending queue (non-blocking)."""
+        if self._pending_queue is None:
+            return []
+        items = []
+        while len(items) < limit:
+            try:
+                items.append(self._pending_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return items
 
     async def run(self, user_request: str) -> str:
         """Run a user request, honouring plan mode.

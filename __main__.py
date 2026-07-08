@@ -61,6 +61,20 @@ def rich_print(text: str):
     console.print(Markdown(text))
 
 
+# =============================================================================
+# OpenTelemetry Trace
+# =============================================================================
+
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, ConsoleSpanExporter
+
+_trace_provider = TracerProvider()
+_trace_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+trace.set_tracer_provider(_trace_provider)
+tracer = trace.get_tracer("harness")
+
+
 def _load_dotenv(env_file: str = ".env") -> None:
     """Load environment variables from .env file."""
     try:
@@ -81,6 +95,14 @@ class MCPServerConfig(BaseModel):
     url: str
 
 
+class SubagentProfileConfig(BaseModel):
+    """Named subagent profile — configurable model and prompt per agent type."""
+
+    model: str = ""
+    prompt: str = ""
+    max_steps: int = 30
+
+
 class AgentConfig(BaseModel):
     system_prompt: str = ""
     language_policy: str = ""
@@ -92,6 +114,7 @@ class AgentConfig(BaseModel):
     planner_model: str = ""
     subagent_model: str = ""
     subagent_models: Dict[str, str] = Field(default_factory=dict)
+    subagents: Dict[str, SubagentProfileConfig] = Field(default_factory=dict)
     mcp_servers: Dict[str, MCPServerConfig] = Field(default_factory=dict)
     output_style: str = ""
     compact_ratio: float = 0.8
@@ -394,6 +417,7 @@ class SubagentManager:
         self,
         *,
         task_prompt: str,
+        agent_name: str = "",
         label: str = "",
         session_key: str = "",
         parent_controller: Any,
@@ -411,24 +435,31 @@ class SubagentManager:
             """Run a full agent turn in an isolated context and push result back."""
             try:
                 cfg = parent_controller.cfg
-                subagent_model_name = cfg.agent.subagent_model
 
-                if subagent_model_name:
+                # Resolve subagent profile: named profile > global subagent_model > parent provider
+                profile = cfg.agent.subagents.get(agent_name) if agent_name else None
+                model_name = (profile.model if profile and profile.model else "") or cfg.agent.subagent_model
+
+                if model_name:
                     provider_entry = next(
-                        (p for p in cfg.providers if p.model == subagent_model_name or p.name == subagent_model_name),
+                        (p for p in cfg.providers if p.model == model_name or p.name == model_name),
                         None,
                     )
-                    assert provider_entry is not None, f"No provider found for subagent_model '{subagent_model_name}' in config.yaml providers"
+                    assert provider_entry is not None, f"No provider found for subagent model '{model_name}' in config.yaml providers"
                 else:
                     provider_entry = parent_controller.provider.entry
 
-                system_prompt = cfg.resolve_system_prompt(parent_controller.root) + ("\n\nYou are a subagent spawned to handle a specific task. " "Complete the task thoroughly and report your results. " "Be concise but complete in your final answer.")
+                max_steps = (profile.max_steps if profile else 0) or min(cfg.agent.max_steps or 30, 30)
+
+                # Build system prompt: profile prompt > default
+                extra_prompt = (profile.prompt if profile and profile.prompt else "") or ("You are a subagent spawned to handle a specific task. " "Complete the task thoroughly and report your results. " "Be concise but complete in your final answer.")
+                system_prompt = cfg.resolve_system_prompt(parent_controller.root) + "\n\n" + extra_prompt
 
                 sub_context = Context(system_prompt, cfg.agent, parent_controller.perm_manager)
                 sub_context.add_user(task_prompt)
                 provider = Provider(provider_entry)
 
-                for _ in range(min(cfg.agent.max_steps or 30, 30)):
+                for _ in range(max_steps):
                     response = await provider.chat(
                         sub_context.to_openai(),
                         parent_controller.registry.schemas(),
@@ -965,20 +996,26 @@ class WebSearchTool(SafeTool):
 class SpawnTool(SafeTool):
     """Tool for the LLM to spawn background subagents."""
 
-    def __init__(self, manager: SubagentManager):
+    def __init__(self, manager: SubagentManager, profiles: Dict[str, "SubagentProfileConfig"] = None):
         self._manager = manager
+        self._profiles = profiles or {}
 
     def name(self):
         return "spawn"
 
     def description(self):
-        return "Spawn a subagent to handle a task in the background. " "Use for complex or time-consuming tasks that can run independently. " "The subagent reports back when done. You can spawn multiple for parallel work."
+        base = "Spawn a subagent to handle a task in the background. " "Use when: a task has multiple independent parts that can run in parallel; " "a subtask is complex enough to benefit from its own focused context; " "you need to research/read extensively without bloating your main context. " "Each subagent gets its own conversation and tools, reports back automatically. " "Do NOT spawn for trivial tasks (single file read, simple edits) — handle those directly."
+        if self._profiles:
+            agents_desc = "; ".join(f"'{name}'" + (f" ({p.prompt[:60]}...)" if len(p.prompt) > 60 else f" ({p.prompt})" if p.prompt else "") for name, p in self._profiles.items())
+            base += f" Available agents: {agents_desc}."
+        return base
 
     def schema(self):
         return {
             "type": "object",
             "properties": {
                 "task": {"type": "string", "description": "The task for the subagent. Be specific and include all necessary context."},
+                "agent": {"type": "string", "description": "Optional named subagent profile from config (e.g. 'researcher', 'coder'). Uses default if omitted."},
                 "label": {"type": "string", "description": "Optional short label for display."},
             },
             "required": ["task"],
@@ -993,6 +1030,7 @@ class SpawnTool(SafeTool):
 
         return await ctx.subagent_manager.spawn(
             task_prompt=args["task"],
+            agent_name=args.get("agent", ""),
             label=args.get("label", ""),
             session_key=ctx.current_session_id or "default",
             parent_controller=ctx,
@@ -1268,6 +1306,7 @@ class Provider:
         self.entry = entry
         self.api_key = os.environ.get(entry.api_key_env, "") or entry.api_key_env
 
+    @tracer.start_as_current_span("llm_chat")
     async def chat(self, messages: List[dict], tools: List[dict], temperature: float = 0.0) -> dict:
         """Send request to LLM using litellm async (supporting OpenAI/Gemini/Anthropic, etc.)."""
         from litellm import acompletion, exceptions
@@ -1521,11 +1560,12 @@ class Controller:
             for tool in tools:
                 self.registry.add(tool)
 
+    @tracer.start_as_current_span("boot")
     async def boot(self) -> None:
         await self._register_mcp_tools()
         register_all_builtins(self.registry, self.cfg, self.root)
         # Register spawn tool for subagent support
-        self.registry.add(SpawnTool(self.subagent_manager))
+        self.registry.add(SpawnTool(self.subagent_manager, self.cfg.agent.subagents))
         if not self.cfg.providers:
             raise RuntimeError("No providers configured. Add at least one provider to config.yaml.")
         default = next((p for p in self.cfg.providers if p.default), self.cfg.providers[0])
@@ -1582,6 +1622,7 @@ class Controller:
                 return False
             _stdout("Please answer y (approve) or n (reject).")
 
+    @tracer.start_as_current_span("run_turn")
     async def _run_turn(self, composed_input: str) -> str:
         """Run one model turn (tool loop) and return the last assistant text.
 
@@ -1651,8 +1692,8 @@ class Controller:
                 if finish in ("error", "interrupted"):
                     return content or "(error)"
 
-                self.context.add_assistant(content or "", tool_calls=tool_calls or None)
                 if tool_calls:
+                    self.context.add_assistant(content or "", tool_calls=tool_calls)
                     for tc in tool_calls:
                         tid = tc.get("id", "unknown")
                         fn = tc.get("function", {})
@@ -1686,7 +1727,8 @@ class Controller:
                         res_str = f"result:\n{result[:600]}"
                         log_box("tool", f"{call_str}\n{'-' * 36}\n{res_str}")
                 else:
-                    # No tool calls — if subagents still running, wait then re-loop
+                    # No tool calls — if subagents still running, discard this
+                    # transitional reply and wait for results before re-looping
                     if self.subagent_manager.get_running_count() > 0:
                         _stdout("⏳ Waiting for running subagents to complete...")
                         while self.subagent_manager.get_running_count() > 0:
@@ -1698,8 +1740,11 @@ class Controller:
                             self.context.add_user(f"[Subagent Result (task_id={msg['task_id']}, label={msg['label']})]\n{msg['content']}")
                             log_box("mcp", f"⬅ Subagent result: [{msg['task_id']}] {msg['label']}\n{msg['content'][:300]}")
                         continue
+                    # Real final response — persist to context
+                    self.context.add_assistant(content or "")
                     return content or "(no response)"
                 if finish == "stop":
+                    self.context.add_assistant(content or "")
                     return content or "(stopped)"
         except KeyboardInterrupt:
             logger.warning("\nInterrupted by user. Context retained.")
@@ -1721,6 +1766,7 @@ class Controller:
                 break
         return items
 
+    @tracer.start_as_current_span("agent_run")
     async def run(self, user_request: str) -> str:
         """Run a user request, honouring plan mode.
 
@@ -2064,6 +2110,7 @@ def main(argv=None) -> None:
 # Rebuild models to resolve forward references
 Config.model_rebuild()
 AgentConfig.model_rebuild()
+SubagentProfileConfig.model_rebuild()
 ToolsConfig.model_rebuild()
 
 SandboxConfig.model_rebuild()

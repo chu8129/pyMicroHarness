@@ -233,14 +233,6 @@ agent:
     ```
 
     This confirms the output started normally and serves as a self-reminder to address exactly what the user asked.
-
-    ## Subagent Delegation
-    You have a `spawn` tool that creates background subagents. Use it when:
-    - A task has multiple independent parts that can run in parallel
-    - A subtask is complex enough to benefit from its own focused context
-    - You need to research/read extensively without bloating your main context
-    Each subagent gets its own conversation and tools. Results are reported back automatically.
-    Do NOT spawn for trivial tasks (single file read, simple edits) — handle those directly.
   language_policy: |
     Reply in the same language the user is using in their most recent message:
     if they write in Chinese answer in Chinese, in English answer in English,
@@ -254,8 +246,17 @@ agent:
   auto_plan: false                     # Automatic planning: true | false
   reasoning_language: auto             # Reasoning language: auto | en | zh
   planner_model: ""                    # Dedicated planning model
-  subagent_model: ""                   # Sub-agent model
-  subagent_models: {}                  # Models by skill
+  subagent_model: ""                   # Sub-agent model (global fallback)
+  subagent_models: {}                  # Models by skill (legacy)
+  subagents:                           # Named subagent profiles
+    researcher:
+      model: ""
+      prompt: "You are a research subagent. Focus on gathering information, reading files, and web searches. Synthesize findings concisely."
+      max_steps: 20
+    coder:
+      model: ""
+      prompt: "You are a coding subagent. Focus on writing, editing, and testing code. Be precise and verify your changes."
+      max_steps: 30
   output_style: ""                     # Output style
   compact_ratio: 0.8                   # Compression threshold
   compact_force_ratio: 0.9             # Forced compression threshold

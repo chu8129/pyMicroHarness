@@ -309,7 +309,6 @@ _HTTP_MAX_CONCURRENCY = 10  # httpx.Limits 控制最大并发连接数
 
 
 async def get_http_client() -> "httpx.AsyncClient":
-    """获取全局共享的 httpx.AsyncClient（懒初始化，连接池复用）"""
     global _http_pool
     if _http_pool is None:
         import httpx
@@ -323,10 +322,12 @@ async def get_http_client() -> "httpx.AsyncClient":
 
 
 async def close_http_pool():
-    """关闭全局 HTTP 连接池（程序退出时调用）"""
     global _http_pool
     if _http_pool is not None:
-        await _http_pool.aclose()
+        try:
+            await _http_pool.aclose()
+        except RuntimeError:
+            pass
         _http_pool = None
 
 
@@ -535,7 +536,7 @@ class BashTool(SafeTool):
 
         ask_tool = AskTool()
         display_options = [p.replace(r"\s*", " ") for p in suggestions] + ["Run once", "Deny"]
-        choice = ask_tool(ctx, {"question": f"Command requires approval: {command}. Choose a pattern to allow or an action:", "options": display_options})
+        choice = await ask_tool(ctx, {"question": f"Command requires approval: {command}. Choose a pattern to allow or an action:", "options": display_options})
 
         if choice in display_options:
             idx = display_options.index(choice)
@@ -1204,7 +1205,6 @@ class _MCPRemoteTool(SafeTool):
         return True
 
     async def __call__(self, ctx, args) -> str:
-        """直接 await 远程调用（整个 agent loop 已在 async 上下文中）"""
         return await self._call_remote(args)
 
     async def _call_remote(self, args: dict) -> str:
@@ -1542,6 +1542,20 @@ class Controller:
 # =============================================================================
 
 
+async def _run_and_cleanup(ctrl, req: str) -> str:
+    """Run a turn and close the http pool before returning.
+
+    Each asyncio.run() creates a new event loop that is closed on exit.
+    The global httpx.AsyncClient is bound to the loop that created it,
+    so it must be destroyed before the loop closes to avoid
+    'Event loop is closed' errors on the next asyncio.run() call.
+    """
+    try:
+        return await ctrl.run(req)
+    finally:
+        await close_http_pool()
+
+
 def _read_input_auto(timeout: float = 0.08) -> str:
     """Read user input using prompt_toolkit. Supports multiline via Alt+Enter."""
     from prompt_toolkit import PromptSession
@@ -1787,7 +1801,7 @@ def main(argv=None) -> None:
                     _stdout(f"Triggering skill: {skill_name} with args: {skill_args}")
                     ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill directory: {skill.path}\n\nSkill definition:\n{skill.body}")
                     _stdout("")
-                    rich_print(asyncio.run(ctrl.run("Proceed with this skill execution")))
+                    rich_print(asyncio.run(_run_and_cleanup(ctrl, "Proceed with this skill execution")))
                     _stdout("")
                     handled = True
         if stop:
@@ -1801,7 +1815,7 @@ def main(argv=None) -> None:
         # Default: send to LLM
         try:
             _stdout("")
-            rich_print(asyncio.run(ctrl.run(req)))
+            rich_print(asyncio.run(_run_and_cleanup(ctrl, req)))
             _stdout("")
             if one_shot:
                 break
@@ -1809,10 +1823,6 @@ def main(argv=None) -> None:
             _stdout("\n\n⚠️  Cancelled (Ctrl+C). Exiting.")
             break
     sid = ctrl.save_session()
-    try:
-        asyncio.run(close_http_pool())
-    except RuntimeError:
-        pass
     _stdout(f"\nSession saved. Resume with: --resume {sid}")
 
 

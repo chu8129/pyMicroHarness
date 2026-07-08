@@ -384,7 +384,7 @@ class WriteFileTool(SafeTool):
         return False
 
     async def __call__(self, ctx, args):
-        if not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+        if not await ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
 
         path = Path(args["path"]).resolve()
@@ -443,7 +443,7 @@ class EditFileTool(SafeTool):
         return False
 
     async def __call__(self, ctx, args):
-        if not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+        if not await ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
 
         path = Path(args["path"]).resolve()
@@ -471,7 +471,7 @@ class ReflectionShellTool(SafeTool):
         return self.config.read_only
 
     async def __call__(self, ctx, args):
-        if self.config.read_only == False and not ctx.perm_manager.check_and_request_permission(ctx, args.get("path", "")):
+        if self.config.read_only == False and not await ctx.perm_manager.check_and_request_permission(ctx, args.get("path", "")):
             return "Error: Permission denied by user."
 
         full_cmd = self.config.command.format(**args)
@@ -873,7 +873,7 @@ class PermissionManager:
                 return True
         return False
 
-    def check_and_request_permission(self, controller, file_path: str) -> bool:
+    async def check_and_request_permission(self, controller, file_path: str) -> bool:
         if self.check_permission(file_path):
             return True
 
@@ -885,7 +885,7 @@ class PermissionManager:
         if not ask_tool:
             return False
 
-        choice = ask_tool.execute(controller.context, {"question": question, "options": options})
+        choice = await ask_tool.execute(controller.context, {"question": question, "options": options})
         logger.debug(f"Permission choice received: {choice}")
         if choice.lower().strip() in ["1", "y", "yes", ""]:
             self.granted_paths.add(str(path_obj))
@@ -1440,6 +1440,9 @@ class Controller:
                 if usage_summary:
                     console.print(f"[dim]{usage_summary}[/dim]")
 
+                if finish in ("error", "interrupted"):
+                    return content or "(error)"
+
                 self.context.add_assistant(content or "", tool_calls=tool_calls or None)
                 if tool_calls:
                     for tc in tool_calls:
@@ -1806,7 +1809,10 @@ def main(argv=None) -> None:
             _stdout("\n\n⚠️  Cancelled (Ctrl+C). Exiting.")
             break
     sid = ctrl.save_session()
-    asyncio.run(close_http_pool())
+    try:
+        asyncio.run(close_http_pool())
+    except RuntimeError:
+        pass
     _stdout(f"\nSession saved. Resume with: --resume {sid}")
 
 

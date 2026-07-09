@@ -481,14 +481,11 @@ class SubagentManager:
                     for tc in tool_calls:
                         fn = tc.get("function", {})
                         tname = fn.get("name", "")
-                        if tname == "spawn":
-                            result = "Error: Subagents cannot spawn nested subagents."
-                        else:
-                            try:
-                                args = json.loads(fn.get("arguments", "{}")) if isinstance(fn.get("arguments"), str) else fn.get("arguments", {})
-                            except json.JSONDecodeError:
-                                args = {}
-                            result = await parent_controller.registry.execute_gated(tname, parent_controller, args)
+                        try:
+                            args = json.loads(fn.get("arguments", "{}")) if isinstance(fn.get("arguments"), str) else fn.get("arguments", {})
+                        except json.JSONDecodeError:
+                            args = {}
+                        result = await parent_controller.registry.execute_gated(tname, parent_controller, args)
                         sub_context.add_tool_result(tname, tc.get("id", "unknown"), result)
 
                     if finish == "stop":

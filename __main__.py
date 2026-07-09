@@ -1841,9 +1841,13 @@ class Controller:
                             self.context.add_user(f"[Subagent Result (task_id={msg['task_id']}, label={msg['label']})]\n{msg['content']}")
                             log_box("mcp", f"⬅ Subagent result: [{msg['task_id']}] {msg['label']}\n{msg['content'][:300]}")
                         continue
-                    # Real final response — persist to context
+                    # Only return if model signaled finish=stop; otherwise continue requesting
+                    if finish == "stop":
+                        self.context.add_assistant(content or "")
+                        return content or "(no response)"
+                    # Model didn't finish — add to context and continue loop
                     self.context.add_assistant(content or "")
-                    return content or "(no response)"
+                    continue
                 if finish == "stop":
                     self.context.add_assistant(content or "")
                     return content or "(stopped)"

@@ -243,7 +243,7 @@ agent:
   max_steps: 0                         # Max execution steps (0=unlimited)
   planner_max_steps: 12                # Max planner steps
   temperature: 1.0                     # LLM temperature
-  auto_plan: false                     # Automatic planning: true | false
+  auto_plan: true                      # Automatic planning: true | false
   reasoning_language: auto             # Reasoning language: auto | en | zh
   planner_model: ""                    # Dedicated planning model
   subagent_model: ""                   # Sub-agent model (global fallback)

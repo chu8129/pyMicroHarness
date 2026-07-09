@@ -1054,7 +1054,7 @@ class TodoWriteTool(SafeTool):
         return "todo_write"
 
     def description(self):
-        return "Track multi-step task progress."
+        return "Track multi-step task progress. Pass the full todo list each time. You can add, remove, or split todos mid-execution — e.g. expand one step into multiple sub-steps when complexity is discovered."
 
     def schema(self):
         return {"type": "object", "properties": {"todos": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "content": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["id", "content", "status"]}}}, "required": ["todos"]}
@@ -1066,9 +1066,9 @@ class TodoWriteTool(SafeTool):
         target = ctx.context if hasattr(ctx, "context") else ctx
         if hasattr(target, "todos"):
             target.todos = args["todos"]
-            todo_display = "\n".join([f"  [{t['status']:<11}] {t['content']}" for t in args["todos"]])
+            todo_display = "\n".join([f"[{t['status']}] {t['content']}" for t in args["todos"]])
             _stdout(f"\n\U0001f4dd TASK PROGRESS:\n{todo_display}\n")
-        return f"Updated {len(args['todos'])} todos"
+        return todo_display
 
 
 class WebSearchTool(SafeTool):
@@ -1090,7 +1090,11 @@ class WebSearchTool(SafeTool):
         from bs4 import BeautifulSoup
 
         query, engine = args["query"], args.get("engine", "duckduckgo")
-        configs = {"baidu": ("http://www.baidu.com/s", {"wd": query}, ".c-container"), "duckduckgo": ("https://html.duckduckgo.com/html/", {"q": query}, ".result"), "google": ("https://www.google.com/search", {"q": query}, ".tF2Cxc")}
+        configs = {
+            "baidu": ("http://www.baidu.com/s", {"wd": query}, ".c-container"),
+            "duckduckgo": ("https://html.duckduckgo.com/html/", {"q": query}, ".result"),
+            "google": ("https://www.google.com/search", {"q": query}, ".tF2Cxc"),
+        }
 
         if engine not in configs:
             return f"Unsupported engine: {engine}"
@@ -1387,19 +1391,10 @@ class Context:
             self.messages = [Message(MessageRole.ASSISTANT, summary)] + keep
 
     def to_openai(self) -> List[dict]:
-        out = [{"role": "system", "content": self.system_prompt}]
-        for m in self.messages:
-            if m.role == MessageRole.SYSTEM:
-                continue
-            entry = {"role": m.role.value, "content": m.content}
-            if m.name:
-                entry["name"] = m.name
-            if m.tool_call_id:
-                entry["tool_call_id"] = m.tool_call_id
-            if m.tool_calls:
-                entry["tool_calls"] = m.tool_calls
-            out.append(entry)
-        return out
+        openai_messages = [{"role": "system", "content": self.system_prompt}]
+        for message in self.messages:
+            openai_messages.append(message.to_dict())
+        return openai_messages
 
     def to_dict(self) -> dict:
         return {
@@ -1587,7 +1582,7 @@ class Controller:
         self.perm_manager = PermissionManager()
         self.context: Optional[Context] = None
         self.step_count = 0
-        self._plan_mode: bool = False
+        self._plan_mode: bool = self.cfg.agent.auto_plan
         self.current_session_id: Optional[str] = None
         # Subagent support
         self.subagent_manager: SubagentManager = SubagentManager(max_concurrent=4)
@@ -1726,22 +1721,7 @@ class Controller:
         _stdout("\u2550" * 60)
         _stdout(proposal)
         _stdout("\u2550" * 60)
-        if not sys.stdin.isatty():
-            # Non-interactive: auto-approve (mirrors headless bot behaviour).
-            _stdout("[non-interactive] Auto-approving plan.")
-            return True
-        while True:
-            try:
-                ans = input("Approve this plan? [y/n] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                _stdout("")
-                return False
-            if ans in ("y", "yes", ""):
-                return True
-            if ans in ("n", "no"):
-                _stdout("Plan rejected. Plan mode remains active. Enter revised instructions.")
-                return False
-            _stdout("Please answer y (approve) or n (reject).")
+        return True
 
     @tracer.start_as_current_span("run_turn")
     async def _run_turn(self, composed_input: str) -> str:

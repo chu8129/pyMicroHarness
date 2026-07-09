@@ -436,7 +436,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 # =============================================================================
 
 _http_pool: "httpx.AsyncClient | None" = None
-_HTTP_MAX_CONCURRENCY = 10  # httpx.Limits 控制最大并发连接数
+_HTTP_MAX_CONCURRENCY = 10
 
 
 async def get_http_client() -> "httpx.AsyncClient":
@@ -913,7 +913,7 @@ class GrepTool(SafeTool):
                 for i, line in enumerate(fp.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
                     if rx.search(line):
                         matches.append(f"{fp}:{i}:{line}")
-                        if len(matches) >= 1000:  # Simple safety limit
+                        if len(matches) >= 3000:  # Simple safety limit
                             matches.append("... (limit reached)")
                             break
             except Exception:

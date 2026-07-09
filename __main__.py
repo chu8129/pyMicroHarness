@@ -462,7 +462,7 @@ class SubagentManager:
                 for _ in range(max_steps):
                     response = await provider.chat(
                         sub_context.to_openai(),
-                        parent_controller.registry.schemas(),
+                        [t for t in parent_controller.registry.schemas() if t["function"]["name"] != "spawn"],
                         cfg.agent.temperature,
                     )
 

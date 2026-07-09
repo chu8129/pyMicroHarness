@@ -1737,6 +1737,7 @@ class Controller:
         and injected as user messages so the model can incorporate them.
         """
         self.context.add_user(composed_input)
+        turn_start_idx = len(self.context.messages)
         max_steps = self.cfg.agent.max_steps or 10**8
         last_content = ""
 
@@ -1777,7 +1778,7 @@ class Controller:
                 if finish:
                     model_parts.append(f"[finish={finish}]")
                 if content:
-                    model_parts.append(content[:500])
+                    model_parts.append(content)
                 if tool_calls:
                     tc_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
                     model_parts.append(f"\u2192 tools: {', '.join(tc_names)}")
@@ -1844,13 +1845,25 @@ class Controller:
                     # Only return if model signaled finish=stop; otherwise continue requesting
                     if finish == "stop":
                         self.context.add_assistant(content or "")
-                        return content or "(no response)"
+                        # Warn user if todos are incomplete
+                        incomplete = [t for t in self.context.todos if t.get("status") in ("pending", "in_progress")]
+                        if incomplete:
+                            _stdout(f"⚠️  Model stopped with {len(incomplete)} incomplete todo items remaining.")
+                        # Return full history of assistant responses in this conversation
+                        assistant_history = [msg.content for msg in self.context.messages[turn_start_idx:] if msg.role == MessageRole.ASSISTANT and msg.content]
+                        return "\n\n".join(assistant_history)
                     # Model didn't finish — add to context and continue loop
                     self.context.add_assistant(content or "")
                     continue
                 if finish == "stop":
                     self.context.add_assistant(content or "")
-                    return content or "(stopped)"
+                    # Warn user if todos are incomplete
+                    incomplete = [t for t in self.context.todos if t.get("status") in ("pending", "in_progress")]
+                    if incomplete:
+                        _stdout(f"⚠️  Model stopped with {len(incomplete)} incomplete todo items remaining.")
+                    # Return full history of assistant responses in this conversation
+                    assistant_history = [msg.content for msg in self.context.messages[turn_start_idx:] if msg.role == MessageRole.ASSISTANT and msg.content]
+                    return "\n\n".join(assistant_history)
         except KeyboardInterrupt:
             logger.warning("\nInterrupted by user. Context retained.")
             await self.subagent_manager.cancel_all()

@@ -110,10 +110,12 @@ agent:
     state the assumption you made before proceeding.
     For multi-step work, track progress with the todo_write tool: lay out the steps,
     keep exactly one in_progress, and flip each to completed as you finish it — update
-    the list as you go, not just at the end.
+    the list as you go, not just at the end. You MUST complete ALL todo items before
+    stopping — never end your turn with pending or in_progress items remaining.
     In plan mode the harness blocks writer tools: do read-only research, then write a
     concise plan as your reply and stop. The user is asked to approve before anything
-    is changed; once approved, work through the steps, updating the task list as you go.
+    is changed; once approved, work through ALL the steps to completion, updating the
+    task list as you go. Do not stop until every item is marked completed.
 
     ---
     name: paramount-guidelines
@@ -290,12 +292,20 @@ plan_mode_marker: |
   The user will be asked to approve before any changes are made.]
 
 plan_approved_message: |
-  Plan approved — plan mode is off; you’re cleared to make the changes 
-  without asking again. Implement the plan now. Use this serial workflow: 
-  1) mark the first sub-step in_progress with todo_write; 
-  2) execute the sub-step; 
-  3) mark it completed and move the next one to in_progress. 
+  Plan approved — plan mode is off; you're cleared to make the changes
+  without asking again. Implement the plan now. Use this serial workflow:
+  1) mark the first sub-step in_progress with todo_write;
+  2) execute the sub-step;
+  3) mark it completed and move the next one to in_progress.
   Sign off one sub-step at a time — never batch multiple completions.
+
+  MANDATORY COMPLETION RULE: You MUST NOT stop or end your response until
+  ALL todo items are marked completed. If there are still pending or
+  in_progress items remaining, you MUST continue working through them.
+  Stopping with incomplete todos is a failure — keep going until every
+  single item is done. Do not summarize progress and stop early. Do not
+  ask the user if they want you to continue. Execute ALL steps to
+  completion autonomously.
 
 tools:
   enabled: []

@@ -75,6 +75,108 @@ trace.set_tracer_provider(_trace_provider)
 tracer = trace.get_tracer("harness")
 
 
+# =============================================================================
+# Nsjail Sandbox Decorator
+# =============================================================================
+
+import functools
+import shutil
+
+_NSJAIL_BIN: Optional[str] = None
+
+
+def _find_nsjail(cfg_path: str = "nsjail") -> Optional[str]:
+    global _NSJAIL_BIN
+    if _NSJAIL_BIN is None:
+        _NSJAIL_BIN = shutil.which(cfg_path) or shutil.which("nsjail")
+    return _NSJAIL_BIN
+
+
+def _check_path(path: str, cfg: "SandboxConfig", workspace: str) -> Optional[str]:
+    """Returns error string if path violates sandbox policy, else None."""
+    resolved = str(Path(path).resolve())
+    for blocked in cfg.blocked_paths:
+        if resolved.startswith(str(Path(blocked).resolve())):
+            return f"Sandbox: blocked path: {resolved}"
+    for ap in cfg.allowed_paths + [workspace]:
+        if resolved.startswith(str(Path(ap).resolve())):
+            return None
+    return f"Sandbox: path outside allowed scope: {resolved}"
+
+
+def _build_nsjail_cmd(command: str, *, nsjail: str, cfg: "SandboxConfig", workspace: str, rw: bool) -> str:
+    """Build nsjail-wrapped command string."""
+    cmd = [
+        nsjail,
+        "--mode",
+        "o",
+        "--quiet",
+        "--rlimit_as",
+        str(cfg.rlimit_as_mb),
+        "--rlimit_cpu",
+        str(cfg.rlimit_cpu_s),
+        "--rlimit_fsize",
+        str(cfg.rlimit_fsize_mb),
+        "--cgroup_mem_max",
+        str(cfg.cgroup_mem_max_mb * 1024 * 1024),
+        "--chroot",
+        "/",
+    ]
+    bind_flag = "--rw" if rw else ""
+    if bind_flag:
+        cmd += [bind_flag]
+    cmd += ["--bind", f"{workspace}:{workspace}"]
+    for p in cfg.allowed_paths:
+        cmd += ["--rw", "--bind", f"{p}:{p}"]
+    if cfg.net_disabled:
+        cmd += ["--disable_clone_newnet"]
+    cmd += ["--", "/bin/bash", "-c", command]
+    return " ".join(cmd)
+
+
+def sandboxed(mode: str = "r"):
+    """Decorator factory: @sandboxed("rw") or @sandboxed("r") or @sandboxed("net").
+
+    - "r"   : path check (read-only scope enforcement)
+    - "rw"  : path check (write scope enforcement)
+    - "net" : block if sandbox has net_disabled=True
+
+    Applied to SafeTool.__call__(self, ctx, args).
+    If sandbox disabled, falls through transparently.
+    """
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper(self, ctx, args):
+            cfg = ctx.cfg.sandbox if hasattr(ctx, "cfg") else None
+            if not cfg or not cfg.enabled:
+                return await fn(self, ctx, args)
+
+            workspace = getattr(ctx, "root", ".")
+            tool_name = self.name() if hasattr(self, "name") else fn.__name__
+
+            if mode == "net":
+                if cfg.net_disabled:
+                    logger.info(f"[sandbox] BLOCKED net | tool={tool_name} | net_disabled=True")
+                    return "Error: Sandbox: network access is disabled."
+                logger.debug(f"[sandbox] ALLOWED net | tool={tool_name}")
+                return await fn(self, ctx, args)
+
+            # Path-based check for file tools
+            if "path" in args:
+                err = _check_path(args["path"], cfg, workspace)
+                if err:
+                    logger.info(f"[sandbox] BLOCKED {mode} | tool={tool_name} | path={args['path']} | workspace={workspace} | allowed={cfg.allowed_paths} | blocked={cfg.blocked_paths}")
+                    return f"Error: {err}"
+
+            logger.debug(f"[sandbox] ALLOWED {mode} | tool={tool_name} | path={args.get('path', 'N/A')}")
+            return await fn(self, ctx, args)
+
+        return wrapper
+
+    return decorator
+
+
 def _load_dotenv(env_file: str = ".env") -> None:
     """Load environment variables from .env file."""
     try:
@@ -145,6 +247,12 @@ class SandboxConfig(BaseModel):
     enabled: bool = False
     allowed_paths: List[str] = Field(default_factory=list)
     blocked_paths: List[str] = Field(default_factory=list)
+    nsjail_path: str = "nsjail"
+    rlimit_as_mb: int = 512
+    rlimit_cpu_s: int = 30
+    rlimit_fsize_mb: int = 64
+    cgroup_mem_max_mb: int = 512
+    net_disabled: bool = True
 
 
 class ProviderEntry(BaseModel):
@@ -563,6 +671,7 @@ class WriteFileTool(SafeTool):
     def read_only(self):
         return False
 
+    @sandboxed("rw")
     async def __call__(self, ctx, args):
         if not await ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
@@ -586,6 +695,7 @@ class ReadFileTool(SafeTool):
     def read_only(self):
         return True
 
+    @sandboxed("r")
     async def __call__(self, ctx, args):
         path = Path(args["path"]).resolve()
         if not path.exists():
@@ -622,6 +732,7 @@ class EditFileTool(SafeTool):
     def read_only(self):
         return False
 
+    @sandboxed("rw")
     async def __call__(self, ctx, args):
         if not await ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
@@ -702,13 +813,14 @@ class BashTool(SafeTool):
         lines = [line for line in command.splitlines() if line.strip() and not line.strip().startswith("#")]
         return "\n".join(lines)
 
+    @sandboxed("rw")
     async def __call__(self, ctx, args):
         command = self._clean_command(args["command"])
 
         for pattern in self.allowed_patterns:
             if re.search(pattern, command):
                 logger.info(f"Bash command matched allowed pattern: {pattern}")
-                return await self._execute(command)
+                return await self._execute(command, ctx)
 
         cmd_base = command.split("\n")[0].split()[0]
         suggestions = [rf"^{re.escape(cmd_base)}\s*.*"]
@@ -725,17 +837,23 @@ class BashTool(SafeTool):
         if choice == "Deny" or choice == "Cancelled":
             return "Execution denied by user."
         elif choice == "Run once":
-            return await self._execute(command)
+            return await self._execute(command, ctx)
         elif choice in suggestions:
             self.allowed_patterns.append(choice)
             logger.info(f"Allowed pattern added: {choice}")
-            return await self._execute(command)
+            return await self._execute(command, ctx)
 
         return f"Execution denied: Unrecognized choice '{choice}'."
 
-    async def _execute(self, command):
+    async def _execute(self, command, ctx=None):
+        actual_command = command
+        if ctx and hasattr(ctx, "cfg") and ctx.cfg.sandbox.enabled:
+            nsjail = _find_nsjail(ctx.cfg.sandbox.nsjail_path)
+            if nsjail:
+                actual_command = _build_nsjail_cmd(command, nsjail=nsjail, cfg=ctx.cfg.sandbox, workspace=getattr(ctx, "root", "."), rw=True)
+
         proc = await asyncio.create_subprocess_shell(
-            command,
+            actual_command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             executable=self.path or None,
@@ -784,6 +902,7 @@ class GrepTool(SafeTool):
     def read_only(self):
         return True
 
+    @sandboxed("r")
     async def __call__(self, ctx, args):
         pattern, path = args["pattern"], Path(args["path"])
         rx = re.compile(pattern)
@@ -815,6 +934,7 @@ class GlobTool(SafeTool):
     def read_only(self):
         return True
 
+    @sandboxed("r")
     async def __call__(self, ctx, args):
         return "\n".join(glob.glob(args["pattern"], recursive=True)) or "(no matches)"
 
@@ -832,6 +952,7 @@ class LsTool(SafeTool):
     def read_only(self):
         return True
 
+    @sandboxed("r")
     async def __call__(self, ctx, args):
         p = Path(args["path"])
         if not p.exists():
@@ -862,6 +983,7 @@ class WebFetchTool(SafeTool):
         except:
             return False
 
+    @sandboxed("net")
     async def __call__(self, ctx, args):
         import httpx
 
@@ -962,6 +1084,7 @@ class WebSearchTool(SafeTool):
     def read_only(self):
         return True
 
+    @sandboxed("net")
     async def __call__(self, ctx, args):
         import httpx
         from bs4 import BeautifulSoup
@@ -1429,6 +1552,7 @@ class _MCPRemoteTool(SafeTool):
     def read_only(self) -> bool:
         return True
 
+    @sandboxed("net")
     async def __call__(self, ctx, args) -> str:
         return await self._call_remote(args)
 

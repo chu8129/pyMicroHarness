@@ -263,9 +263,15 @@ agent:
 
 
 sandbox:
-  enabled: false                       # Enable sandbox
-  allowed_paths: []                    # Allowed paths
-  blocked_paths: []                    # Blocked paths
+  enabled: true                       # Enable sandbox
+  allowed_paths: []                    # Additional writable paths (workspace is always allowed)
+  blocked_paths: ["/etc", "/root", "/var"] # Blocked paths (take priority over allowed)
+  nsjail_path: "nsjail"               # Path to nsjail binary
+  rlimit_as_mb: 512                   # Memory limit (MB)
+  rlimit_cpu_s: 30                    # CPU time limit (seconds)
+  rlimit_fsize_mb: 64                 # Max file size (MB)
+  cgroup_mem_max_mb: 512              # Cgroup memory limit (MB)
+  net_disabled: false                  # Disable network in sandbox
 
 plan_mode_marker: |
   [Plan mode — read-only. Explore the codebase first 

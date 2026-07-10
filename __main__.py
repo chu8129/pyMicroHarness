@@ -80,6 +80,7 @@ tracer = trace.get_tracer("harness")
 # =============================================================================
 
 import functools
+import shlex
 import shutil
 
 _NSJAIL_BIN: Optional[str] = None
@@ -117,20 +118,18 @@ def _build_nsjail_cmd(command: str, *, nsjail: str, cfg: "SandboxConfig", worksp
         str(cfg.rlimit_cpu_s),
         "--rlimit_fsize",
         str(cfg.rlimit_fsize_mb),
-        "--cgroup_mem_max",
-        str(cfg.cgroup_mem_max_mb * 1024 * 1024),
         "--chroot",
         "/",
     ]
-    bind_flag = "--rw" if rw else ""
-    if bind_flag:
-        cmd += [bind_flag]
-    cmd += ["--bind", f"{workspace}:{workspace}"]
+    if cfg.cgroup_mem_max_mb > 0 and Path("/sys/fs/cgroup/memory").is_dir():
+        cmd += ["--cgroup_mem_max", str(cfg.cgroup_mem_max_mb * 1024 * 1024)]
+    workspace_flag = "--bindmount" if rw else "--bindmount_ro"
+    cmd += [workspace_flag, f"{workspace}:{workspace}"]
     for p in cfg.allowed_paths:
-        cmd += ["--rw", "--bind", f"{p}:{p}"]
+        cmd += ["--bindmount", f"{p}:{p}"]
     if cfg.net_disabled:
         cmd += ["--disable_clone_newnet"]
-    cmd += ["--", "/bin/bash", "-c", command]
+    cmd += ["--", "/bin/bash", "-c", shlex.quote(command)]
     return " ".join(cmd)
 
 
@@ -850,8 +849,9 @@ class BashTool(SafeTool):
         actual_command = command
         if ctx and hasattr(ctx, "cfg") and ctx.cfg.sandbox.enabled:
             nsjail = _find_nsjail(ctx.cfg.sandbox.nsjail_path)
-            if nsjail:
-                actual_command = _build_nsjail_cmd(command, nsjail=nsjail, cfg=ctx.cfg.sandbox, workspace=getattr(ctx, "root", "."), rw=True)
+            if not nsjail:
+                raise RuntimeError(f"Sandbox is enabled, but nsjail was not found at path: {ctx.cfg.sandbox.nsjail_path}")
+            actual_command = _build_nsjail_cmd(command, nsjail=nsjail, cfg=ctx.cfg.sandbox, workspace=getattr(ctx, "root", "."), rw=True)
 
         proc = await asyncio.create_subprocess_shell(
             actual_command,
@@ -879,7 +879,7 @@ class BashTool(SafeTool):
             proc.kill()
             if proc in self.active_processes:
                 self.active_processes.remove(proc)
-            raise
+            return "⚠️  Operation cancelled."
 
     def __del__(self):
         for proc in self.active_processes:
@@ -1453,7 +1453,7 @@ class Provider:
         try:
             response = await acompletion(**kwargs)
         except KeyboardInterrupt:
-            logger.warning("LLM call interrupted by user.")
+            logger.warning("LLM call interrupted by user. Resuming...")
             return {"content": "(Interrupted by user)", "tool_calls": [], "finish_reason": "interrupted"}
         except exceptions.RateLimitError as e:
             logger.error(f"Rate limit exceeded: {e}")
@@ -1866,7 +1866,7 @@ class Controller:
                     assistant_history = [msg.content for msg in self.context.messages[turn_start_idx:] if msg.role == MessageRole.ASSISTANT and msg.content]
                     return "\n\n".join(assistant_history)
         except KeyboardInterrupt:
-            logger.warning("\nInterrupted by user. Context retained.")
+            logger.warning("\nInterrupted by user. Resuming...")
             await self.subagent_manager.cancel_all()
             return "(Interrupted by user)"
         finally:
@@ -2220,8 +2220,9 @@ def main(argv=None) -> None:
             if one_shot:
                 break
         except KeyboardInterrupt:
-            _stdout("\n\n⚠️  Cancelled (Ctrl+C). Exiting.")
-            break
+            _stdout("\n⚠️  Cancelled (Ctrl+C). Resuming...")
+            continue
+
     sid = ctrl.save_session()
     _stdout(f"\nSession saved. Resume with: --resume {sid}")
 

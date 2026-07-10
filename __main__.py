@@ -193,6 +193,7 @@ def _stdout(msg: str):
 
 
 class MCPServerConfig(BaseModel):
+    enabled: bool = True
     type: str
     url: str
 
@@ -217,7 +218,6 @@ class AgentConfig(BaseModel):
     subagent_model: str = ""
     subagent_models: Dict[str, str] = Field(default_factory=dict)
     subagents: Dict[str, SubagentProfileConfig] = Field(default_factory=dict)
-    mcp_servers: Dict[str, MCPServerConfig] = Field(default_factory=dict)
     output_style: str = ""
     compact_ratio: float = 0.8
     compact_force_ratio: float = 0.9
@@ -289,6 +289,7 @@ class Config(BaseModel):
     default_model: str = ""
     providers: List[ProviderEntry] = Field(default_factory=list)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    mcp_servers: Dict[str, MCPServerConfig] = Field(default_factory=dict)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     skills: List[dict] = Field(default_factory=list)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
@@ -1670,7 +1671,7 @@ class Controller:
 
     async def _register_mcp_tools(self):
         """连接所有配置的 MCP 服务端，发现并注册其暴露的工具。"""
-        tasks = [_MCPRemoteTool.discover_all(name, cfg.url) for name, cfg in self.cfg.agent.mcp_servers.items()]
+        tasks = [_MCPRemoteTool.discover_all(name, cfg.url) for name, cfg in self.cfg.mcp_servers.items() if cfg.enabled]
         all_results = await asyncio.gather(*tasks)
         for tools in all_results:
             for tool in tools:

@@ -1738,9 +1738,8 @@ class Controller:
         and injected as user messages so the model can incorporate them.
         """
         self.context.add_user(composed_input)
-        turn_start_idx = len(self.context.messages)
+        turn_assistant_contents = []  # Track assistant content independently of compaction
         max_steps = self.cfg.agent.max_steps or 10**8
-        last_content = ""
 
         # Initialize pending queue for subagent result injection
         self._pending_queue = asyncio.Queue()
@@ -1797,6 +1796,8 @@ class Controller:
 
                 if tool_calls:
                     self.context.add_assistant(content or "", tool_calls=tool_calls)
+                    if content:
+                        turn_assistant_contents.append(content)
                     for tc in tool_calls:
                         tid = tc.get("id", "unknown")
                         fn = tc.get("function", {})
@@ -1846,32 +1847,34 @@ class Controller:
                     # Only return if model signaled finish=stop; otherwise continue requesting
                     if finish == "stop":
                         self.context.add_assistant(content or "")
+                        if content:
+                            turn_assistant_contents.append(content)
                         # Warn user if todos are incomplete
                         incomplete = [t for t in self.context.todos if t.get("status") in ("pending", "in_progress")]
                         if incomplete:
                             _stdout(f"⚠️  Model stopped with {len(incomplete)} incomplete todo items remaining.")
-                        # Return full history of assistant responses in this conversation
-                        assistant_history = [msg.content for msg in self.context.messages[turn_start_idx:] if msg.role == MessageRole.ASSISTANT and msg.content]
-                        return "\n\n".join(assistant_history)
+                        return "\n\n".join(turn_assistant_contents) if turn_assistant_contents else content or "(no output)"
                     # Model didn't finish — add to context and continue loop
                     self.context.add_assistant(content or "")
+                    if content:
+                        turn_assistant_contents.append(content)
                     continue
                 if finish == "stop":
                     self.context.add_assistant(content or "")
+                    if content:
+                        turn_assistant_contents.append(content)
                     # Warn user if todos are incomplete
                     incomplete = [t for t in self.context.todos if t.get("status") in ("pending", "in_progress")]
                     if incomplete:
                         _stdout(f"⚠️  Model stopped with {len(incomplete)} incomplete todo items remaining.")
-                    # Return full history of assistant responses in this conversation
-                    assistant_history = [msg.content for msg in self.context.messages[turn_start_idx:] if msg.role == MessageRole.ASSISTANT and msg.content]
-                    return "\n\n".join(assistant_history)
+                    return "\n\n".join(turn_assistant_contents) if turn_assistant_contents else content or "(no output)"
         except KeyboardInterrupt:
             logger.warning("\nInterrupted by user. Resuming...")
             await self.subagent_manager.cancel_all()
             return "(Interrupted by user)"
         finally:
             self._pending_queue = None
-        return last_content or "(max_steps reached)"
+        return "\n\n".join(turn_assistant_contents) if turn_assistant_contents else "(max_steps reached)"
 
     async def _drain_pending_queue(self, limit: int = 5) -> List[dict]:
         """Drain completed subagent results from the pending queue (non-blocking)."""

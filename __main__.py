@@ -1691,7 +1691,10 @@ class Controller:
         self.context = Context(system_prompt, self.cfg.agent, self.perm_manager)
 
         _cmd = " ".join(getattr(sys, "orig_argv", sys.argv))
-        system_info = f"\nSystem Info: Platform={sys.platform}, Python={sys.version.split()[0]}"
+        import datetime
+
+        now = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        system_info = f"\nSystem Info: Platform={sys.platform}, Python={sys.version.split()[0]}, Time={now}"
         self.context.add_user(f"System initialized. Service started with command: `{_cmd}`{system_info}")
 
         mcp_tools = [t.name() for t in self.registry.list() if t.name().startswith("mcp_")]
@@ -2003,6 +2006,7 @@ COMMANDS
   /plan on/off    Enable or disable plan mode
   /plan status      Check current plan mode status
   /context          Display current context and LLM request payload
+  /history          Display conversation history
   /exit, /quit      Exit (automatically saves session)
   q                 Exit (same as /quit)
 
@@ -2110,6 +2114,14 @@ def main(argv=None) -> None:
         asyncio.run(ctrl.boot())
         print_help()
 
+    def _cmd_history(req):
+        if ctrl.context:
+            _stdout("--- Interaction History ---")
+            for msg in ctrl.context.messages:
+                _stdout(f"[{msg.role.value.upper()}] {msg.content}")
+        else:
+            _stdout("Context is empty.")
+
     def _cmd_plan(req):
         parts = req.split(None, 1)
         sub = parts[1].strip().lower() if len(parts) > 1 else None
@@ -2152,6 +2164,7 @@ def main(argv=None) -> None:
         "/mcp": _cmd_mcp,
         "/mcp": _cmd_mcp,
         "/info": _cmd_info,
+        "/history": _cmd_history,
     }
     # Prefix-match commands (checked in order)
     PREFIX_COMMANDS = [
@@ -2181,7 +2194,26 @@ def main(argv=None) -> None:
         # Dispatch system commands
         handled = False
         stop = False
-        if req in COMMANDS:
+        if req.startswith("/"):
+            # Check exact match
+            if req in COMMANDS:
+                try:
+                    COMMANDS[req](req)
+                    handled = True
+                except StopIteration:
+                    break
+            else:
+                # Check prefix match
+                for prefix, func in PREFIX_COMMANDS:
+                    if req.startswith(prefix):
+                        func(req)
+                        handled = True
+                        break
+
+            if not handled:
+                _stdout(f"Unknown command: '{req}'.\nNote: Any input starting with '/' is interpreted as a system command. Please check your spelling or use a valid command.")
+                continue
+        elif req in COMMANDS:
             try:
                 COMMANDS[req](req)
             except StopIteration:

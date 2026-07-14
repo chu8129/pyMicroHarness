@@ -823,10 +823,10 @@ class BashTool(SafeTool):
                 return await self._execute(command, ctx)
 
         cmd_base = command.split("\n")[0].split()[0]
-        suggestions = [rf"^{re.escape(cmd_base)}\s*.*"]
+        suggestions = [rf"^{re.escape(cmd_base)}\s*.*", ".*"]
 
         ask_tool = AskTool()
-        display_options = [p.replace(r"\s*", " ") for p in suggestions] + ["Run once", "Deny"]
+        display_options = [p.replace(r"\s*", " ") if p != ".*" else "Allow all commands" for p in suggestions] + ["Run once", "Deny"]
         choice = await ask_tool(ctx, {"question": f"Command requires approval: {command}. Choose a pattern to allow or an action:", "options": display_options})
 
         if choice in display_options:

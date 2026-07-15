@@ -91,7 +91,7 @@ providers:
 
 mcp_servers:
   bing_cn_search:
-    enabled: true
+    enabled: false
     type: sse
     url: https://mcp.api-inference.modelscope.net/1d7637d7ca4045/sse
 

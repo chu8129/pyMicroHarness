@@ -268,7 +268,7 @@ agent:
 
 
 sandbox:
-  enabled: true                       # Enable sandbox
+  enabled: false                       # Enable sandbox
   allowed_paths: []                    # Additional writable paths (workspace is always allowed)
   blocked_paths: ["/etc", "/root", "/var"] # Blocked paths (take priority over allowed)
   nsjail_path: "nsjail"               # Path to nsjail binary

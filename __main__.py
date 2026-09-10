@@ -34,6 +34,8 @@ import sys
 import json
 import re
 import glob
+import time
+import uuid
 import subprocess
 import signal
 import asyncio
@@ -561,7 +563,7 @@ class SubagentManager:
 
                 # Build system prompt: profile prompt > default
                 extra_prompt = (profile.prompt if profile and profile.prompt else "") or ("You are a subagent spawned to handle a specific task. " "Complete the task thoroughly and report your results. " "Be concise but complete in your final answer.")
-                system_prompt = cfg.resolve_system_prompt(parent_controller.root) + "\n\n" + extra_prompt
+                system_prompt = parent_controller._sys_prompt_with_capabilities(cfg.resolve_system_prompt(parent_controller.root), extra_prompt, exclude=("spawn",))
 
                 sub_context = Context(system_prompt, cfg.agent, parent_controller.perm_manager)
                 sub_context.add_user(task_prompt)
@@ -1347,6 +1349,32 @@ class Message:
             tool_calls=d.get("tool_calls"),
         )
 
+    def to_agent_dict(self, provider: str = "", model: str = "") -> dict:
+        """Agent-style message: role + typed content blocks."""
+        timestamp = int(time.time() * 1000)
+        if self.role == MessageRole.TOOL:
+            return {"role": "toolResult", "toolCallId": self.tool_call_id or "", "toolName": self.name or "", "content": [{"type": "text", "text": self.content or ""}], "isError": False, "timestamp": timestamp}
+        if self.role == MessageRole.ASSISTANT:
+            blocks = [{"type": "text", "text": self.content}] if self.content else []
+            for call in self.tool_calls or []:
+                fn = call.get("function") or {}
+                args = fn.get("arguments")
+                args = json.loads(args) if isinstance(args, str) else args
+                blocks.append({"type": "toolCall", "id": call.get("id", ""), "name": fn.get("name", ""), "arguments": args if isinstance(args, dict) else {"value": args}})
+            cost = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
+            usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0, "totalTokens": 0, "cost": cost}
+            return {"role": "assistant", "content": blocks, "api": "openai-completions", "provider": provider, "model": model, "usage": usage, "stopReason": "toolUse" if self.tool_calls else "stop", "timestamp": timestamp}
+        return {"role": "user", "content": [{"type": "text", "text": self.content or ""}], "timestamp": timestamp}
+
+    @classmethod
+    def from_agent_dict(cls, d: dict) -> "Message":
+        content = d.get("content")
+        blocks = content if isinstance(content, list) else []
+        text = content if isinstance(content, str) else "\n".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+        tool_calls = [{"id": b.get("id", ""), "type": "function", "function": {"name": b.get("name", ""), "arguments": json.dumps(b.get("arguments", {}), ensure_ascii=False)}} for b in blocks if isinstance(b, dict) and b.get("type") == "toolCall"]
+        role = {"system": MessageRole.SYSTEM, "assistant": MessageRole.ASSISTANT, "toolResult": MessageRole.TOOL}.get(d.get("role"), MessageRole.USER)
+        return cls(role, text, name=d.get("toolName"), tool_call_id=d.get("toolCallId"), tool_calls=tool_calls or None)
+
 
 class Context:
     def __init__(self, system_prompt: str, cfg: AgentConfig, perm_manager: Any = None):
@@ -1513,11 +1541,11 @@ class _MCPRemoteTool(SafeTool):
     @classmethod
     async def discover_all(cls, server_name: str, url: str) -> list:
         """连接 MCP 服务端，发现所有工具，返回 _MCPRemoteTool 实例列表"""
-        from mcp import ClientSession
-        from mcp.client.sse import sse_client
-
         tools = []
         try:
+            from mcp import ClientSession
+            from mcp.client.sse import sse_client
+
             async with sse_client(url) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -1533,7 +1561,7 @@ class _MCPRemoteTool(SafeTool):
                         )
             logger.info(f"MCP '{server_name}' → {len(tools)} tools: {[t._tool_name for t in tools]}")
         except Exception as e:
-            logger.error(f"MCP Discovery failed for '{server_name}' ({url}): {e}")
+            logger.warning(f"MCP Discovery failed for '{server_name}' ({url}): {e}")
         return tools
 
     def name(self) -> str:
@@ -1594,50 +1622,80 @@ class Controller:
         self.registry.plan_mode = on
         _stdout(f"Plan mode: {'ON' if on else 'OFF'}")
 
+    def _sys_prompt_with_capabilities(self, base: str, extra: str = "", exclude: tuple = ()) -> str:
+        """base (+ extra) followed by the live capabilities block."""
+
+        def block() -> str:
+            rows = [f"- {t.name()}: {' '.join(t.description().split())}" for t in sorted(self.registry.list(), key=lambda t: t.name()) if t.name() not in exclude]
+            rows += [f"- /{s.name}: {' '.join((s.description or '').split())}" for s in sorted(self.cfg.enabled_skills(), key=lambda s: s.name)]
+            servers = [n for n, c in sorted(self.cfg.mcp_servers.items()) if c.enabled]
+            return ("Available capabilities:\n" + "\n".join(rows) + (f"\nMCP servers: {', '.join(servers)}" if servers else "")) if rows else ""
+
+        return "\n\n".join(p for p in (base, extra, block()) if p)
+
     @property
     def plan_mode(self) -> bool:
         return self._plan_mode
 
     def _sessions_dir(self) -> Path:
-        d = Path.home() / ".reasonix" / "sessions"
+        slug = re.sub(r"[/\\:]", "-", re.sub(r"^[/\\]", "", os.path.abspath(self.root)))
+        d = Path.home() / ".pi" / "agent" / "sessions" / f"--{slug}--"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def save_session(self) -> str:
-        import time, hashlib
-
         if self.current_session_id:
             sid = self.current_session_id
         else:
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            rand = hashlib.sha256(str(time.time()).encode()).hexdigest()[:6]
-            sid = f"{ts}_{rand}"
+            sid = str(uuid.uuid7() if hasattr(uuid, "uuid7") else uuid.uuid4())
             self.current_session_id = sid
 
-        data = {
-            "session_id": sid,
-            "workspace_root": self.root,
-            "step_count": self.step_count,
-            "context": self.context.to_dict() if self.context else {},
-        }
-        path = self._sessions_dir() / f"{sid}.json"
+        messages = self.context.messages if self.context else []
+        provider = self.provider.entry.name if getattr(self, "provider", None) else ""
+        model = self.provider.entry.model if getattr(self, "provider", None) else ""
+
+        now = time.time()
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now * 1000) % 1000:03d}Z"
+        entries = [{"type": "session", "version": 3, "id": sid, "timestamp": timestamp, "cwd": self.root}]
+        parent_id = None
+        system_prompt = self.context.system_prompt if self.context else ""
+        if system_prompt:
+            entry_id = uuid.uuid4().hex[:8]
+            entries.append({"type": "message", "id": entry_id, "parentId": None, "timestamp": timestamp, "message": {"role": "system", "content": [{"type": "text", "text": system_prompt}], "timestamp": int(now * 1000)}})
+            parent_id = entry_id
+        for message in messages:
+            entry_id = uuid.uuid4().hex[:8]
+            entries.append({"type": "message", "id": entry_id, "parentId": parent_id, "timestamp": timestamp, "message": message.to_agent_dict(provider, model)})
+            parent_id = entry_id
+        entries.append({"type": "custom", "id": uuid.uuid4().hex[:8], "parentId": parent_id, "timestamp": timestamp, "customType": "harness.state", "data": {"todos": self.context.todos if self.context else [], "step_count": self.step_count}})
+
+        sessions_dir = self._sessions_dir()
+        existing = sorted(sessions_dir.glob(f"*_{sid}.jsonl"))
+        path = existing[-1] if existing else sessions_dir / f"{timestamp.replace(':', '-').replace('.', '-')}_{sid}.jsonl"
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            for entry in entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        logger.info(f"Session saved to: {path}")
         return sid
 
     def load_session(self, sid: str) -> bool:
-        path = self._sessions_dir() / f"{sid}.json"
+        sessions_dir = self._sessions_dir()
+        path = sessions_dir / (sid if sid.endswith(".jsonl") else f"{sid}.jsonl")
         if not path.exists():
+            hits = sorted(sessions_dir.glob(f"*_{sid}.jsonl"))
+            if not hits:
+                return False
+            path = hits[-1]
+        logger.info(f"Resuming session from: {path}")
+        entries = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if not entries or entries[0].get("type") != "session":
             return False
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        self.root = data.get("workspace_root", self.root)
-        self.step_count = data.get("step_count", 0)
-        ctx_data = data.get("context", {})
-        self.current_session_id = sid
-        if ctx_data:
-            self.context = Context.from_dict(ctx_data, self.cfg.agent)
-        return True
+        state = next((e["data"] for e in entries if e.get("type") == "custom" and isinstance(e.get("data"), dict)), {})
+        self.current_session_id = str(entries[0].get("id") or sid)
+        self.step_count = state.get("step_count", 0)
+        self.context = Context(self._sys_prompt_with_capabilities(self.cfg.resolve_system_prompt(self.root)), self.cfg.agent)
+        self.context.messages = [Message.from_agent_dict(e["message"]) for e in entries if e.get("type") == "message" and isinstance(e.get("message"), dict) and e["message"].get("role") != "system"]
+        self.context.todos = state.get("todos", [])
         return True
 
     def list_providers(self) -> List[str]:
@@ -1665,7 +1723,7 @@ class Controller:
         return f"Switched to provider: {target.name} ({target.model})"
 
     def reset_context(self) -> None:
-        system_prompt = self.cfg.resolve_system_prompt(self.root)
+        system_prompt = self._sys_prompt_with_capabilities(self.cfg.resolve_system_prompt(self.root))
         self.context = Context(system_prompt, self.cfg.agent, self.perm_manager)
         self.step_count = 0
 
@@ -1687,15 +1745,14 @@ class Controller:
             raise RuntimeError("No providers configured. Add at least one provider to config.yaml.")
         default = next((p for p in self.cfg.providers if p.default), self.cfg.providers[0])
         self.provider = Provider(default)
-        system_prompt = self.cfg.resolve_system_prompt(self.root)
+        system_prompt = self._sys_prompt_with_capabilities(self.cfg.resolve_system_prompt(self.root))
         self.context = Context(system_prompt, self.cfg.agent, self.perm_manager)
 
-        _cmd = " ".join(getattr(sys, "orig_argv", sys.argv))
         import datetime
 
         now = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
         system_info = f"\nSystem Info: Platform={sys.platform}, Python={sys.version.split()[0]}, Time={now}"
-        self.context.add_user(f"System initialized. Service started with command: `{_cmd}`{system_info}")
+        self.context.add_user(f"System initialized. {system_info}")
 
         mcp_tools = [t.name() for t in self.registry.list() if t.name().startswith("mcp_")]
         builtin_tools = [t.name() for t in self.registry.list() if not t.name().startswith("mcp_")]
@@ -2033,7 +2090,7 @@ def main(argv=None) -> None:
     sid_to_load = None
     if args.resume == "AUTO_RESUME":
         sessions_dir = ctrl._sessions_dir()
-        files = list(sessions_dir.glob("*.json"))
+        files = list(sessions_dir.glob("*.jsonl"))
         if files:
             latest_file = max(files, key=os.path.getmtime)
             sid_to_load = latest_file.stem
@@ -2044,8 +2101,10 @@ def main(argv=None) -> None:
         sid_to_load = args.resume
 
     if sid_to_load:
+        register_all_builtins(ctrl.registry, ctrl.cfg, ctrl.root)
+        asyncio.run(ctrl._register_mcp_tools())
+        ctrl.registry.add(SpawnTool(ctrl.subagent_manager, ctrl.cfg.agent.subagents))
         if ctrl.load_session(sid_to_load):
-            register_all_builtins(ctrl.registry, ctrl.cfg, ctrl.root)
             if not ctrl.cfg.providers:
                 raise RuntimeError("No providers configured. Add at least one provider to config.yaml.")
             default = next((p for p in ctrl.cfg.providers if p.default), ctrl.cfg.providers[0])

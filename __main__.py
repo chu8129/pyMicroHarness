@@ -1353,8 +1353,7 @@ class Message:
         """Agent-style message: role + typed content blocks."""
         timestamp = int(time.time() * 1000)
         if self.role == MessageRole.TOOL:
-            return {"role": "toolResult", "toolCallId": self.tool_call_id or "", "toolName": self.name or "",
-                    "content": [{"type": "text", "text": self.content or ""}], "isError": False, "timestamp": timestamp}
+            return {"role": "toolResult", "toolCallId": self.tool_call_id or "", "toolName": self.name or "", "content": [{"type": "text", "text": self.content or ""}], "isError": False, "timestamp": timestamp}
         if self.role == MessageRole.ASSISTANT:
             blocks = [{"type": "text", "text": self.content}] if self.content else []
             for call in self.tool_calls or []:
@@ -1364,8 +1363,7 @@ class Message:
                 blocks.append({"type": "toolCall", "id": call.get("id", ""), "name": fn.get("name", ""), "arguments": args if isinstance(args, dict) else {"value": args}})
             cost = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
             usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0, "totalTokens": 0, "cost": cost}
-            return {"role": "assistant", "content": blocks, "api": "openai-completions", "provider": provider, "model": model,
-                    "usage": usage, "stopReason": "toolUse" if self.tool_calls else "stop", "timestamp": timestamp}
+            return {"role": "assistant", "content": blocks, "api": "openai-completions", "provider": provider, "model": model, "usage": usage, "stopReason": "toolUse" if self.tool_calls else "stop", "timestamp": timestamp}
         return {"role": "user", "content": [{"type": "text", "text": self.content or ""}], "timestamp": timestamp}
 
     @classmethod
@@ -1373,9 +1371,7 @@ class Message:
         content = d.get("content")
         blocks = content if isinstance(content, list) else []
         text = content if isinstance(content, str) else "\n".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
-        tool_calls = [{"id": b.get("id", ""), "type": "function",
-                       "function": {"name": b.get("name", ""), "arguments": json.dumps(b.get("arguments", {}), ensure_ascii=False)}}
-                      for b in blocks if isinstance(b, dict) and b.get("type") == "toolCall"]
+        tool_calls = [{"id": b.get("id", ""), "type": "function", "function": {"name": b.get("name", ""), "arguments": json.dumps(b.get("arguments", {}), ensure_ascii=False)}} for b in blocks if isinstance(b, dict) and b.get("type") == "toolCall"]
         role = {"assistant": MessageRole.ASSISTANT, "toolResult": MessageRole.TOOL}.get(d.get("role"), MessageRole.USER)
         return cls(role, text, name=d.get("toolName"), tool_call_id=d.get("toolCallId"), tool_calls=tool_calls or None)
 
@@ -1653,14 +1649,9 @@ class Controller:
         parent_id = None
         for message in messages:
             entry_id = uuid.uuid4().hex[:8]
-            entries.append({"type": "message", "id": entry_id, "parentId": parent_id, "timestamp": timestamp,
-                            "message": message.to_agent_dict(provider, model)})
+            entries.append({"type": "message", "id": entry_id, "parentId": parent_id, "timestamp": timestamp, "message": message.to_agent_dict(provider, model)})
             parent_id = entry_id
-        entries.append({"type": "custom", "id": uuid.uuid4().hex[:8], "parentId": parent_id, "timestamp": timestamp,
-                        "customType": "harness.state",
-                        "data": {"system_prompt": self.context.system_prompt if self.context else "",
-                                 "todos": self.context.todos if self.context else [],
-                                 "step_count": self.step_count}})
+        entries.append({"type": "custom", "id": uuid.uuid4().hex[:8], "parentId": parent_id, "timestamp": timestamp, "customType": "harness.state", "data": {"system_prompt": self.context.system_prompt if self.context else "", "todos": self.context.todos if self.context else [], "step_count": self.step_count}})
 
         sessions_dir = self._sessions_dir()
         existing = sorted(sessions_dir.glob(f"*_{sid}.jsonl"))
@@ -1741,12 +1732,11 @@ class Controller:
         system_prompt = self.cfg.resolve_system_prompt(self.root)
         self.context = Context(system_prompt, self.cfg.agent, self.perm_manager)
 
-        _cmd = " ".join(getattr(sys, "orig_argv", sys.argv))
         import datetime
 
         now = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
         system_info = f"\nSystem Info: Platform={sys.platform}, Python={sys.version.split()[0]}, Time={now}"
-        self.context.add_user(f"System initialized. Service started with command: `{_cmd}`{system_info}")
+        self.context.add_user(f"System initialized. {system_info}")
 
         mcp_tools = [t.name() for t in self.registry.list() if t.name().startswith("mcp_")]
         builtin_tools = [t.name() for t in self.registry.list() if not t.name().startswith("mcp_")]

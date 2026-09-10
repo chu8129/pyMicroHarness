@@ -1372,7 +1372,7 @@ class Message:
         blocks = content if isinstance(content, list) else []
         text = content if isinstance(content, str) else "\n".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
         tool_calls = [{"id": b.get("id", ""), "type": "function", "function": {"name": b.get("name", ""), "arguments": json.dumps(b.get("arguments", {}), ensure_ascii=False)}} for b in blocks if isinstance(b, dict) and b.get("type") == "toolCall"]
-        role = {"assistant": MessageRole.ASSISTANT, "toolResult": MessageRole.TOOL}.get(d.get("role"), MessageRole.USER)
+        role = {"system": MessageRole.SYSTEM, "assistant": MessageRole.ASSISTANT, "toolResult": MessageRole.TOOL}.get(d.get("role"), MessageRole.USER)
         return cls(role, text, name=d.get("toolName"), tool_call_id=d.get("toolCallId"), tool_calls=tool_calls or None)
 
 
@@ -1647,11 +1647,16 @@ class Controller:
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now * 1000) % 1000:03d}Z"
         entries = [{"type": "session", "version": 3, "id": sid, "timestamp": timestamp, "cwd": self.root}]
         parent_id = None
+        system_prompt = self.context.system_prompt if self.context else ""
+        if system_prompt:
+            entry_id = uuid.uuid4().hex[:8]
+            entries.append({"type": "message", "id": entry_id, "parentId": None, "timestamp": timestamp, "message": {"role": "system", "content": [{"type": "text", "text": system_prompt}], "timestamp": int(now * 1000)}})
+            parent_id = entry_id
         for message in messages:
             entry_id = uuid.uuid4().hex[:8]
             entries.append({"type": "message", "id": entry_id, "parentId": parent_id, "timestamp": timestamp, "message": message.to_agent_dict(provider, model)})
             parent_id = entry_id
-        entries.append({"type": "custom", "id": uuid.uuid4().hex[:8], "parentId": parent_id, "timestamp": timestamp, "customType": "harness.state", "data": {"system_prompt": self.context.system_prompt if self.context else "", "todos": self.context.todos if self.context else [], "step_count": self.step_count}})
+        entries.append({"type": "custom", "id": uuid.uuid4().hex[:8], "parentId": parent_id, "timestamp": timestamp, "customType": "harness.state", "data": {"todos": self.context.todos if self.context else [], "step_count": self.step_count}})
 
         sessions_dir = self._sessions_dir()
         existing = sorted(sessions_dir.glob(f"*_{sid}.jsonl"))
@@ -1675,10 +1680,12 @@ class Controller:
         if not entries or entries[0].get("type") != "session":
             return False
         state = next((e["data"] for e in entries if e.get("type") == "custom" and isinstance(e.get("data"), dict)), {})
+        system_message = next((e["message"] for e in entries if e.get("type") == "message" and isinstance(e.get("message"), dict) and e["message"].get("role") == "system"), None)
         self.current_session_id = str(entries[0].get("id") or sid)
         self.step_count = state.get("step_count", 0)
-        self.context = Context(state.get("system_prompt") or self.cfg.resolve_system_prompt(self.root), self.cfg.agent)
-        self.context.messages = [Message.from_agent_dict(e["message"]) for e in entries if e.get("type") == "message" and isinstance(e.get("message"), dict)]
+        system_prompt = Message.from_agent_dict(system_message).content if system_message else state.get("system_prompt")
+        self.context = Context(system_prompt or self.cfg.resolve_system_prompt(self.root), self.cfg.agent)
+        self.context.messages = [Message.from_agent_dict(e["message"]) for e in entries if e.get("type") == "message" and isinstance(e.get("message"), dict) and e["message"].get("role") != "system"]
         self.context.todos = state.get("todos", [])
         return True
 

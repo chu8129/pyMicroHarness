@@ -563,7 +563,7 @@ class SubagentManager:
 
                 # Build system prompt: profile prompt > default
                 extra_prompt = (profile.prompt if profile and profile.prompt else "") or ("You are a subagent spawned to handle a specific task. " "Complete the task thoroughly and report your results. " "Be concise but complete in your final answer.")
-                system_prompt = cfg.resolve_system_prompt(parent_controller.root) + "\n\n" + extra_prompt
+                system_prompt = parent_controller._sys_prompt_with_capabilities(cfg.resolve_system_prompt(parent_controller.root), extra_prompt, exclude=("spawn",))
 
                 sub_context = Context(system_prompt, cfg.agent, parent_controller.perm_manager)
                 sub_context.add_user(task_prompt)
@@ -1541,11 +1541,11 @@ class _MCPRemoteTool(SafeTool):
     @classmethod
     async def discover_all(cls, server_name: str, url: str) -> list:
         """连接 MCP 服务端，发现所有工具，返回 _MCPRemoteTool 实例列表"""
-        from mcp import ClientSession
-        from mcp.client.sse import sse_client
-
         tools = []
         try:
+            from mcp import ClientSession
+            from mcp.client.sse import sse_client
+
             async with sse_client(url) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -1561,7 +1561,7 @@ class _MCPRemoteTool(SafeTool):
                         )
             logger.info(f"MCP '{server_name}' → {len(tools)} tools: {[t._tool_name for t in tools]}")
         except Exception as e:
-            logger.error(f"MCP Discovery failed for '{server_name}' ({url}): {e}")
+            logger.warning(f"MCP Discovery failed for '{server_name}' ({url}): {e}")
         return tools
 
     def name(self) -> str:
@@ -1622,6 +1622,17 @@ class Controller:
         self.registry.plan_mode = on
         _stdout(f"Plan mode: {'ON' if on else 'OFF'}")
 
+    def _sys_prompt_with_capabilities(self, base: str, extra: str = "", exclude: tuple = ()) -> str:
+        """base (+ extra) followed by the live capabilities block."""
+
+        def block() -> str:
+            rows = [f"- {t.name()}: {' '.join(t.description().split())}" for t in sorted(self.registry.list(), key=lambda t: t.name()) if t.name() not in exclude]
+            rows += [f"- /{s.name}: {' '.join((s.description or '').split())}" for s in sorted(self.cfg.enabled_skills(), key=lambda s: s.name)]
+            servers = [n for n, c in sorted(self.cfg.mcp_servers.items()) if c.enabled]
+            return ("Available capabilities:\n" + "\n".join(rows) + (f"\nMCP servers: {', '.join(servers)}" if servers else "")) if rows else ""
+
+        return "\n\n".join(p for p in (base, extra, block()) if p)
+
     @property
     def plan_mode(self) -> bool:
         return self._plan_mode
@@ -1680,11 +1691,9 @@ class Controller:
         if not entries or entries[0].get("type") != "session":
             return False
         state = next((e["data"] for e in entries if e.get("type") == "custom" and isinstance(e.get("data"), dict)), {})
-        system_message = next((e["message"] for e in entries if e.get("type") == "message" and isinstance(e.get("message"), dict) and e["message"].get("role") == "system"), None)
         self.current_session_id = str(entries[0].get("id") or sid)
         self.step_count = state.get("step_count", 0)
-        system_prompt = Message.from_agent_dict(system_message).content if system_message else state.get("system_prompt")
-        self.context = Context(system_prompt or self.cfg.resolve_system_prompt(self.root), self.cfg.agent)
+        self.context = Context(self._sys_prompt_with_capabilities(self.cfg.resolve_system_prompt(self.root)), self.cfg.agent)
         self.context.messages = [Message.from_agent_dict(e["message"]) for e in entries if e.get("type") == "message" and isinstance(e.get("message"), dict) and e["message"].get("role") != "system"]
         self.context.todos = state.get("todos", [])
         return True
@@ -1714,7 +1723,7 @@ class Controller:
         return f"Switched to provider: {target.name} ({target.model})"
 
     def reset_context(self) -> None:
-        system_prompt = self.cfg.resolve_system_prompt(self.root)
+        system_prompt = self._sys_prompt_with_capabilities(self.cfg.resolve_system_prompt(self.root))
         self.context = Context(system_prompt, self.cfg.agent, self.perm_manager)
         self.step_count = 0
 
@@ -1736,7 +1745,7 @@ class Controller:
             raise RuntimeError("No providers configured. Add at least one provider to config.yaml.")
         default = next((p for p in self.cfg.providers if p.default), self.cfg.providers[0])
         self.provider = Provider(default)
-        system_prompt = self.cfg.resolve_system_prompt(self.root)
+        system_prompt = self._sys_prompt_with_capabilities(self.cfg.resolve_system_prompt(self.root))
         self.context = Context(system_prompt, self.cfg.agent, self.perm_manager)
 
         import datetime
@@ -2092,8 +2101,10 @@ def main(argv=None) -> None:
         sid_to_load = args.resume
 
     if sid_to_load:
+        register_all_builtins(ctrl.registry, ctrl.cfg, ctrl.root)
+        asyncio.run(ctrl._register_mcp_tools())
+        ctrl.registry.add(SpawnTool(ctrl.subagent_manager, ctrl.cfg.agent.subagents))
         if ctrl.load_session(sid_to_load):
-            register_all_builtins(ctrl.registry, ctrl.cfg, ctrl.root)
             if not ctrl.cfg.providers:
                 raise RuntimeError("No providers configured. Add at least one provider to config.yaml.")
             default = next((p for p in ctrl.cfg.providers if p.default), ctrl.cfg.providers[0])

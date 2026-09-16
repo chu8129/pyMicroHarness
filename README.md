@@ -71,6 +71,8 @@ python .
 
 ## Feishu / Lark Gateway
 
+[feishu app link](https://open.feishu.cn/app)
+
 The harness can serve the same agent as a Feishu (Lark) bot. Events arrive over a
 WebSocket long connection, so no public IP, webhook, or port forwarding is needed.
 

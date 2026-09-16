@@ -66,7 +66,6 @@ providers:
     request_timeout: 60
     retry_time: 5
     delay: 2
-    default: true
 
   - name: mota
     kind: openai
@@ -88,12 +87,39 @@ providers:
     retry_time: 5
     delay: 2
 
+  # DeepSeek V4.1 Flash (canonical id: deepseek-flash; legacy alias deepseek-v4.1-flash-expires-on-0910)
+  - name: deepseek
+    kind: openai
+    base_url: https://api.deepseek.com/v1
+    model: deepseek-flash
+    api_key_env: DEEPSEEK_API_KEY
+    context_window: 1000000
+    request_timeout: 120
+    retry_time: 3
+    delay: 0.3
+    default: true
+
 
 mcp_servers:
   bing_cn_search:
     enabled: false
     type: sse
     url: https://mcp.api-inference.modelscope.net/1d7637d7ca4045/sse
+
+# Feishu / Lark gateway — start with: python . gateway
+# Events arrive over a WebSocket long connection, so no public IP or webhook is needed.
+feishu:
+  app_id: ""                 # Feishu open-platform App ID (or set FEISHU_APP_ID)
+  app_secret: ""             # App secret (or set FEISHU_APP_SECRET)
+  domain: feishu             # feishu (China) | lark (international)
+  encrypt_key: ""            # optional: event encryption key
+  verification_token: ""     # optional: event verification token
+  allow_from: []             # sender open_ids allowed to talk to the bot (empty = everyone)
+  group_policy: mention      # mention (answer only when @mentioned) | all
+  reply_to_message: true     # quote the user's message in the reply
+  ask_timeout_seconds: 300   # how long an `ask` question waits for a chat reply (then it assumes a default)
+  max_concurrent_turns: 4    # agent turns running in parallel across chats
+  max_chats: 50              # in-memory chat sessions (oldest are evicted and saved)
 
 agent:
   # system_prompt supports two formats:

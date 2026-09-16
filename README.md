@@ -69,6 +69,53 @@ Start the service by running:
 python .
 ```
 
+## Feishu / Lark Gateway
+
+The harness can serve the same agent as a Feishu (Lark) bot. Events arrive over a
+WebSocket long connection, so no public IP, webhook, or port forwarding is needed.
+
+### 1. Create the bot
+
+On the [Feishu Open Platform](https://open.feishu.cn/app) (or [Lark](https://open.larksuite.com/app)):
+
+1. Create an app and copy its **App ID** and **App Secret**.
+2. Enable the **Bot** capability.
+3. Under *Events and callbacks*, choose **long connection** mode and subscribe to
+   `im.message.receive_v1` (required).
+4. Grant the bot permissions: `im:message`, `im:message:send_as_bot`
+   (and `im:chat:readonly` if you use group chats).
+5. Publish a version so the app is available to your tenant.
+
+### 2. Configure
+
+```bash
+export FEISHU_APP_ID="cli_xxx"
+export FEISHU_APP_SECRET="xxx"
+```
+
+…or fill in the `feishu:` block in `config.yaml` (`app_id`, `app_secret`,
+`allow_from`, `group_policy`, `reply_to_message`, …).
+
+Install the SDK and start the gateway — it reads `config.yaml` from the current
+directory and needs no command-line options:
+
+```bash
+pip install lark-oapi
+python . gateway        # or run `python .` and type /gateway
+```
+
+### Behaviour
+
+- Each chat gets its own isolated, persisted session (resume with `--resume`).
+- Duplicate events are dropped; messages from senders outside `allow_from` are ignored.
+- Group chats only trigger the bot when it is `@mentioned` unless `group_policy: all`.
+- Long answers are split into several messages; by default the reply quotes the
+  user's message (`reply_to_message`).
+- When the model needs a decision (`ask` tool) the question and its numbered options are
+  posted into the chat and the turn waits (default 300s, `feishu.ask_timeout_seconds`) for a
+  reply. Answer with `1`, `2`, … or the option text; any other text is passed through as a
+  free-form answer. If nobody answers in time the agent states its assumption and continues.
+
 ## Global Command Setup
 
 To invoke the tool from any directory, choose one of the following methods:

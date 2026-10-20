@@ -881,7 +881,7 @@ class BashTool(SafeTool):
         for proc in self.active_processes:
             try:
                 proc.kill()
-            except:
+            except:  # noqa
                 pass
         self.active_processes = []
 
@@ -913,7 +913,7 @@ class GrepTool(SafeTool):
                         if len(matches) >= 3000:  # Simple safety limit
                             matches.append("... (limit reached)")
                             break
-            except Exception as e:
+            except Exception as e:  # noqa
                 logger.warning(f"Error reading {fp}: {e}")
                 continue
         return "\n".join(matches) if matches else "(no matches)"
@@ -1043,7 +1043,7 @@ class AskTool(SafeTool):
             return choice
         except EOFError:
             return "Cancelled"
-        except Exception as e:
+        except Exception as e:  # noqa
             logger.exception(f"Tool {self.name()} execution failed")
             return f"Error: Tool execution failed - {str(e)}"
 
@@ -1528,7 +1528,7 @@ class _MCPRemoteTool(SafeTool):
                             )
                         )
             logger.info(f"MCP '{server_name}' → {len(tools)} tools: {[t._tool_name for t in tools]}")
-        except Exception as e:
+        except Exception as e:  # noqa
             logger.warning(f"MCP Discovery failed for '{server_name}' ({url}): {e}")
         return tools
 
@@ -1777,7 +1777,7 @@ class Controller:
                 except KeyboardInterrupt:
                     logger.warning("\nInterrupted by user during LLM call.")
                     raise
-                except Exception as e:
+                except Exception as e:  # noqa
                     sys.stdout.write(f"\n⚠️  LLM call failed after retries: {e}\n")
                     sys.stdout.flush()
                     return f"Error: LLM call failed — {e}"

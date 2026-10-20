@@ -666,9 +666,6 @@ class SafeTool(Tool, ABC):
             logger.exception(f"Tool {self.name()} execution failed")
             return f"Error: Tool execution failed - {str(e)}"
 
-    async def __call__(self, ctx, args):
-        return await self.execute(ctx, args)
-
     @abstractmethod
     async def __call__(self, ctx: Any, args: dict) -> str: ...
 

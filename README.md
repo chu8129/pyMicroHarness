@@ -2,6 +2,14 @@
 
 A streamlined, lightweight harness for orchestrating tasks and managing configurations.
 
+- 支持openai provider
+- 支持planing
+- 支持skills
+- 支持mcp
+- 支持subagent
+- 支持sandbox
+- 支持飞书
+
 ## Prerequisites
 
 - Python 3.x

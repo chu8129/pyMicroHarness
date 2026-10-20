@@ -49,7 +49,7 @@ import urllib.request
 import yaml
 from loguru import logger
 from abc import ABC, abstractmethod
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple
 from enum import Enum
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -87,17 +87,17 @@ import functools
 import shlex
 import shutil
 
-_NSJAIL_BIN: Optional[str] = None
+_NSJAIL_BIN: str | None = None
 
 
-def _find_nsjail(cfg_path: str = "nsjail") -> Optional[str]:
+def _find_nsjail(cfg_path: str = "nsjail") -> str | None:
     global _NSJAIL_BIN
     if _NSJAIL_BIN is None:
         _NSJAIL_BIN = shutil.which(cfg_path) or shutil.which("nsjail")
     return _NSJAIL_BIN
 
 
-def _check_path(path: str, cfg: SandboxConfig, workspace: str) -> Optional[str]:
+def _check_path(path: str, cfg: SandboxConfig, workspace: str) -> str | None:
     """Returns error string if path violates sandbox policy, else None."""
     resolved = str(Path(path).resolve())
     for blocked in cfg.blocked_paths:
@@ -236,7 +236,7 @@ class ReflectionToolConfig(BaseModel):
     command: str
     read_only: bool = True
     schema_dict: dict = Field(alias="schema", default_factory=dict)
-    platform: Optional[str] = None
+    platform: str | None = None
 
 
 class ToolsConfig(BaseModel):
@@ -404,7 +404,7 @@ class Config(BaseModel):
     def skills_data(self) -> list[SkillEntry]:
         return getattr(self, "_skills_data", [])
 
-    def get_skill(self, name: str) -> Optional[SkillEntry]:
+    def get_skill(self, name: str) -> SkillEntry | None:
         for s in self.skills_data:
             if s.name == name:
                 return s
@@ -1258,7 +1258,7 @@ class Registry:
     def add(self, tool: Tool) -> None:
         self._tools[tool.name()] = tool
 
-    def get(self, name: str) -> Optional[Tool]:
+    def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
     def list(self) -> list[Tool]:
@@ -1598,12 +1598,12 @@ class Controller:
         self.cfg = Config.load_for_root(self.root)
         self.registry = Registry()
         self.perm_manager = PermissionManager()
-        self.context: Optional[Context] = None
+        self.context: Context | None = None
         self.step_count = 0
         self._plan_mode: bool = self.cfg.agent.auto_plan
-        self.current_session_id: Optional[str] = None
+        self.current_session_id: str | None = None
         self.subagent_manager: SubagentManager = SubagentManager(max_concurrent=4)
-        self._pending_queue: Optional[asyncio.Queue] = None
+        self._pending_queue: asyncio.Queue | None = None
         self._last_turn_error: str = ""
 
     def set_plan_mode(self, on: bool) -> None:
@@ -2139,7 +2139,7 @@ def _surface_commands(surface: str) -> dict[str, _CommandSpec]:
     return commands
 
 
-def lookup_command(req: str, surface: str) -> Optional[tuple[_CommandSpec, str]]:
+def lookup_command(req: str, surface: str) -> tuple[_CommandSpec, str] | None:
     commands = _surface_commands(surface)
     head = req.split(None, 1)[0] if req.split() else ""
     for key in (req, head):
@@ -2236,11 +2236,11 @@ class FeishuGateway:
         self.root = os.path.abspath(root)
         self.cfg = Config.load_for_root(self.root)
         self.feishu: FeishuConfig = self.cfg.feishu
-        self.base: Optional[Controller] = None
+        self.base: Controller | None = None
         self._client: Any = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._bot_open_id: str = ""
-        self._sem: Optional[asyncio.Semaphore] = None
+        self._sem: asyncio.Semaphore | None = None
         self._chats: OrderedDict[str, Controller] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
         self._pending_asks: dict[str, asyncio.Future] = {}
@@ -2334,7 +2334,7 @@ class FeishuGateway:
             return
         asyncio.run_coroutine_threadsafe(self._handle_message(info), loop)
 
-    def _event_info(self, data: Any) -> Optional[dict]:
+    def _event_info(self, data: Any) -> dict | None:
         event = getattr(data, "event", None)
         message = getattr(event, "message", None)
         if message is None:
@@ -2453,7 +2453,7 @@ class FeishuGateway:
         target = "/".join(p for p in (provider_name, model) if p) or "current model"
         return f"⚠️ Model call failed: {reason} ({target}). The full error is in the log; please retry later."
 
-    def _run_command(self, controller: Controller, text: str) -> Optional[str]:
+    def _run_command(self, controller: Controller, text: str) -> str | None:
         req = text.strip()
         found = lookup_command(req, _SURFACE_CHAT)
         if found is None:

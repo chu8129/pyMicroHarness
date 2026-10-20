@@ -1,6 +1,7 @@
 # Harness
 
 A streamlined, lightweight harness for orchestrating tasks and managing configurations.
+This project is intended solely for reproducing and understanding the underlying implementation of Harness. In pursuit of maximum code simplicity, the code is not split into modules but consolidated into a single file.
 
 - 支持openai provider
 - 支持planing

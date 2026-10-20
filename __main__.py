@@ -138,15 +138,22 @@ def _build_nsjail_cmd(command: str, *, nsjail: str, cfg: SandboxConfig, workspac
 
 
 def sandboxed(mode: str = "r"):
-    """Decorator factory: @sandboxed("rw") or @sandboxed("r") or @sandboxed("net").
+    """Decorator factory: @sandboxed("r"), @sandboxed("rw") or @sandboxed("net").
 
-    - "r"   : path check (read-only scope enforcement)
-    - "rw"  : path check (write scope enforcement)
-    - "net" : block if sandbox has net_disabled=True
+    - "r"  : path-scope check for a tool that declares read_only() == True
+    - "rw" : path-scope check for a tool that declares read_only() == False
+    - "net": block when sandbox net_disabled=True
+
+    "r" and "rw" enforce the same allowed/blocked path scope. The mode adds a
+    declaration check so a tool cannot claim read-only while exposing writes
+    (or the reverse). Shell write isolation is enforced by nsjail in
+    BashTool._execute.
 
     Applied to SafeTool.__call__(self, ctx, args).
     If sandbox disabled, falls through transparently.
     """
+    if mode not in ("r", "rw", "net"):
+        raise ValueError(f"Unknown sandbox mode: {mode!r}; use 'r', 'rw' or 'net'")
 
     def decorator(fn):
         @functools.wraps(fn)
@@ -166,6 +173,15 @@ def sandboxed(mode: str = "r"):
                 return await fn(self, ctx, args)
 
             # Path-based check for file tools
+            if mode in ("r", "rw"):
+                declared_read_only = self.read_only() if hasattr(self, "read_only") else (mode == "r")
+                if mode == "r" and not declared_read_only:
+                    logger.error(f"[sandbox] MISCONFIGURED r | tool={tool_name} declares write access")
+                    return "Error: Sandbox: tool is marked read-only but declares write access."
+                if mode == "rw" and declared_read_only:
+                    logger.error(f"[sandbox] MISCONFIGURED rw | tool={tool_name} declares read-only")
+                    return "Error: Sandbox: tool is marked writable but declares read-only access."
+
             if "path" in args:
                 err = _check_path(args["path"], cfg, workspace)
                 if err:
@@ -274,6 +290,7 @@ class ProviderEntry(BaseModel):
     effort: str = ""
     thinking: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
+    extra_body: dict = Field(default_factory=dict)
 
 
 class SkillEntry(BaseModel):
@@ -663,7 +680,7 @@ class SafeTool(Tool, ABC):
     async def execute(self, ctx: Any, args: dict) -> str:
         try:
             return await self(ctx, args)
-        except Exception as e:
+        except Exception as e:  # noqa
             logger.exception(f"Tool {self.name()} execution failed")
             return f"Error: Tool execution failed - {str(e)}"
 
@@ -1465,6 +1482,8 @@ class Provider:
             kwargs["api_base"] = self.entry.base_url
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
+        if self.entry.extra_body:
+            kwargs["extra_body"] = self.entry.extra_body
 
         try:
             response = await acompletion(**kwargs)

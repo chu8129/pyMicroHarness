@@ -97,7 +97,7 @@ def _find_nsjail(cfg_path: str = "nsjail") -> Optional[str]:
     return _NSJAIL_BIN
 
 
-def _check_path(path: str, cfg: "SandboxConfig", workspace: str) -> Optional[str]:
+def _check_path(path: str, cfg: SandboxConfig, workspace: str) -> Optional[str]:
     """Returns error string if path violates sandbox policy, else None."""
     resolved = str(Path(path).resolve())
     for blocked in cfg.blocked_paths:
@@ -109,7 +109,7 @@ def _check_path(path: str, cfg: "SandboxConfig", workspace: str) -> Optional[str
     return f"Sandbox: path outside allowed scope: {resolved}"
 
 
-def _build_nsjail_cmd(command: str, *, nsjail: str, cfg: "SandboxConfig", workspace: str, rw: bool) -> str:
+def _build_nsjail_cmd(command: str, *, nsjail: str, cfg: SandboxConfig, workspace: str, rw: bool) -> str:
     """Build nsjail-wrapped command string."""
     cmd = [
         nsjail,
@@ -1140,7 +1140,7 @@ class WebSearchTool(SafeTool):
 class SpawnTool(SafeTool):
     """Tool for the LLM to spawn background subagents."""
 
-    def __init__(self, manager: SubagentManager, profiles: Dict[str, "SubagentProfileConfig"] = None):
+    def __init__(self, manager: SubagentManager, profiles: Dict[str, SubagentProfileConfig] = None):
         self._manager = manager
         self._profiles = profiles or {}
 
@@ -1338,7 +1338,7 @@ class Message:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Message":
+    def from_dict(cls, d: dict) -> Message:
         return cls(
             role=MessageRole(d["role"]),
             content=d["content"],
@@ -1365,7 +1365,7 @@ class Message:
         return {"role": "user", "content": [{"type": "text", "text": self.content or ""}], "timestamp": timestamp}
 
     @classmethod
-    def from_agent_dict(cls, d: dict) -> "Message":
+    def from_agent_dict(cls, d: dict) -> Message:
         content = d.get("content")
         blocks = content if isinstance(content, list) else []
         text = content if isinstance(content, str) else "\n".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
@@ -1431,7 +1431,7 @@ class Context:
         }
 
     @classmethod
-    def from_dict(cls, d: dict, cfg: AgentConfig) -> "Context":
+    def from_dict(cls, d: dict, cfg: AgentConfig) -> Context:
         ctx = cls(system_prompt=d["system_prompt"], cfg=cfg)
         ctx.messages = [Message.from_dict(m) for m in d.get("messages", [])]
         ctx.todos = d.get("todos", [])
@@ -1982,7 +1982,7 @@ class _CommandSpec(NamedTuple):
     usage: str  # e.g. "/model <name/idx>"; the dispatchable names are parsed from it
     description: str
     surfaces: Tuple[str, ...]
-    handler: Callable[["Controller", str, str], str]  # (controller, arg, surface) -> text
+    handler: Callable[[Controller, str, str], str]  # (controller, arg, surface) -> text
     chat_usage: str = ""  # optional chat-only wording override
     chat_desc: str = ""
     takes_arg: bool = False  # True when the command accepts "<name> <arg>"
@@ -1991,34 +1991,34 @@ class _CommandSpec(NamedTuple):
 # --- Handlers: one per command, shared by both surfaces ----------------------
 
 
-def _cmd_help(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_help(ctrl: Controller, arg: str, surface: str) -> str:
     if surface == _SURFACE_CHAT:
         return _CHAT_COMMANDS_HELP
     print_help()
     return ""
 
 
-def _cmd_exit(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_exit(ctrl: Controller, arg: str, surface: str) -> str:
     if surface == _SURFACE_CHAT:
         return "Not available in chat: the gateway keeps running. Send /new to start a fresh context."
     raise StopIteration  # the REPL loop reads this as "exit"
 
 
-def _cmd_new(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_new(ctrl: Controller, arg: str, surface: str) -> str:
     return _cmd_new_text(ctrl)
 
 
-def _cmd_model(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_model(ctrl: Controller, arg: str, surface: str) -> str:
     return _cmd_model_text(ctrl, arg)
 
 
-def _cmd_context(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_context(ctrl: Controller, arg: str, surface: str) -> str:
     if surface == _SURFACE_CHAT:
         return _context_summary_text(ctrl)  # the full payload is far too long for a chat
     return _cmd_context_text(ctrl)
 
 
-def _cmd_history(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_history(ctrl: Controller, arg: str, surface: str) -> str:
     if not ctrl.context:
         return "Context is empty."
     lines = ["--- Interaction History ---"]
@@ -2026,7 +2026,7 @@ def _cmd_history(ctrl: "Controller", arg: str, surface: str) -> str:
     return "\n".join(lines)
 
 
-def _cmd_plan(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_plan(ctrl: Controller, arg: str, surface: str) -> str:
     sub = arg.strip().lower() or None
     if sub is None:
         ctrl.set_plan_mode(not ctrl.plan_mode)
@@ -2041,22 +2041,22 @@ def _cmd_plan(ctrl: "Controller", arg: str, surface: str) -> str:
     return ""
 
 
-def _cmd_skills(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_skills(ctrl: Controller, arg: str, surface: str) -> str:
     return _cmd_skills_text(ctrl)
 
 
-def _cmd_tools(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_tools(ctrl: Controller, arg: str, surface: str) -> str:
     return _cmd_tools_text(ctrl)
 
 
-def _cmd_mcp(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_mcp(ctrl: Controller, arg: str, surface: str) -> str:
     mcp_tools = [t for t in ctrl.registry.list() if t.name().startswith("mcp_")]
     if not mcp_tools:
         return "No MCP tools found."
     return "Available MCP tools:\n" + "\n".join([f"  {t.name()}: {t.description()}" for t in mcp_tools])
 
 
-def _cmd_info(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_info(ctrl: Controller, arg: str, surface: str) -> str:
     # NOTE: never call ctrl.boot() here — it rebuilds the Context and would silently
     # discard the current conversation.
     if surface == _SURFACE_CHAT:
@@ -2066,7 +2066,7 @@ def _cmd_info(ctrl: "Controller", arg: str, surface: str) -> str:
     return ""
 
 
-def _cmd_gateway(ctrl: "Controller", arg: str, surface: str) -> str:
+def _cmd_gateway(ctrl: Controller, arg: str, surface: str) -> str:
     if surface == _SURFACE_CHAT:
         return "This chat is already served by the Feishu gateway."
     run_feishu_gateway()
@@ -2125,7 +2125,7 @@ def _command_names(usage: str) -> List[str]:
     return names
 
 
-def _surface_commands(surface: str) -> Dict[str, "_CommandSpec"]:
+def _surface_commands(surface: str) -> Dict[str, _CommandSpec]:
     """name -> spec for one surface, derived from the same catalogue the help renders."""
     commands: Dict[str, "_CommandSpec"] = {}
     for spec in _COMMAND_SPECS:
@@ -2139,7 +2139,7 @@ def _surface_commands(surface: str) -> Dict[str, "_CommandSpec"]:
     return commands
 
 
-def lookup_command(req: str, surface: str) -> Optional[Tuple["_CommandSpec", str]]:
+def lookup_command(req: str, surface: str) -> Optional[Tuple[_CommandSpec, str]]:
     commands = _surface_commands(surface)
     head = req.split(None, 1)[0] if req.split() else ""
     for key in (req, head):
@@ -2154,21 +2154,21 @@ def _command_arg(req: str) -> str:
     return parts[1].strip() if len(parts) > 1 else ""
 
 
-def _cmd_new_text(ctrl: "Controller") -> str:
+def _cmd_new_text(ctrl: Controller) -> str:
     """Save the current session, then start a fresh context."""
     sid = ctrl.save_session()
     ctrl.reset_context()
     return f"New context started. Previous session: --resume {sid}"
 
 
-def _cmd_model_text(ctrl: "Controller", arg: str = "") -> str:
+def _cmd_model_text(ctrl: Controller, arg: str = "") -> str:
     """List the configured providers, or switch the controller to one of them."""
     if not arg.strip():
         return "\n".join(ctrl.list_providers())
     return ctrl.switch_provider(arg.strip())
 
 
-def _cmd_context_text(ctrl: "Controller") -> str:
+def _cmd_context_text(ctrl: Controller) -> str:
     """Full simulated LLM request payload (REPL only: far too long for a chat)."""
     if not ctrl.context:
         return "Context is empty."
@@ -2176,7 +2176,7 @@ def _cmd_context_text(ctrl: "Controller") -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
-def _context_summary_text(ctrl: "Controller") -> str:
+def _context_summary_text(ctrl: Controller) -> str:
     """Short context summary, small enough to send as a chat message."""
     if not ctrl.context:
         return "Context is empty."
@@ -2188,12 +2188,12 @@ def _context_summary_text(ctrl: "Controller") -> str:
     return f"Model: {name + '/' if name else ''}{model}\n" f"Messages: {len(ctrl.context.messages)}\n" f"Estimated tokens: {ctrl.context.estimate_tokens()}\n" f"Steps this session: {ctrl.step_count}\n" f"Todos: {len(todos)} ({len(open_todos)} open)\n" f"Tools: {len(ctrl.registry.list())}"
 
 
-def _cmd_skills_text(ctrl: "Controller") -> str:
+def _cmd_skills_text(ctrl: Controller) -> str:
     skills = sorted(ctrl.cfg.enabled_skills(), key=lambda s: s.name)
     return "Available skills:\n" + "\n".join([f"/{s.name} — {s.description[:47] + '...' if len(s.description) > 50 else s.description}" for s in skills])
 
 
-def _cmd_tools_text(ctrl: "Controller") -> str:
+def _cmd_tools_text(ctrl: Controller) -> str:
     builtins = [t for t in ctrl.registry.list() if not t.name().startswith("mcp_")]
     return "Available built-in tools:\n" + "\n".join([f"  {t.name()}" for t in builtins])
 
@@ -2214,7 +2214,7 @@ def _unknown_command_text(text: str) -> str:
 class _FeishuAskTool(AskTool):
     """`ask` in the gateway: post the question to the chat and wait for the reply."""
 
-    def __init__(self, gateway: "FeishuGateway"):
+    def __init__(self, gateway: FeishuGateway):
         self._gateway = gateway
 
     async def __call__(self, ctx: Any, args: dict) -> str:

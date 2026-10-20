@@ -49,7 +49,7 @@ import urllib.request
 import yaml
 from loguru import logger
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, NamedTuple, Optional
 from enum import Enum
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -219,8 +219,8 @@ class AgentConfig(BaseModel):
     reasoning_language: str = "auto"
     planner_model: str = ""
     subagent_model: str = ""
-    subagent_models: Dict[str, str] = Field(default_factory=dict)
-    subagents: Dict[str, SubagentProfileConfig] = Field(default_factory=dict)
+    subagent_models: dict[str, str] = Field(default_factory=dict)
+    subagents: dict[str, SubagentProfileConfig] = Field(default_factory=dict)
     output_style: str = ""
     compact_ratio: float = 0.8
     compact_force_ratio: float = 0.9
@@ -240,16 +240,16 @@ class ReflectionToolConfig(BaseModel):
 
 
 class ToolsConfig(BaseModel):
-    enabled: List[str] = Field(default_factory=list)
-    reflection_tools: List[ReflectionToolConfig] = Field(default_factory=list)
+    enabled: list[str] = Field(default_factory=list)
+    reflection_tools: list[ReflectionToolConfig] = Field(default_factory=list)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     bash_timeout_seconds: int = 120
 
 
 class SandboxConfig(BaseModel):
     enabled: bool = False
-    allowed_paths: List[str] = Field(default_factory=list)
-    blocked_paths: List[str] = Field(default_factory=list)
+    allowed_paths: list[str] = Field(default_factory=list)
+    blocked_paths: list[str] = Field(default_factory=list)
     nsjail_path: str = "nsjail"
     rlimit_as_mb: int = 512
     rlimit_cpu_s: int = 30
@@ -263,14 +263,14 @@ class ProviderEntry(BaseModel):
     kind: str = "openai"
     base_url: str = ""
     model: str = ""
-    models: List[str] = Field(default_factory=list)
+    models: list[str] = Field(default_factory=list)
     default: bool = False
     api_key_env: str = ""
     context_window: int = 0
     request_timeout: int = 120
     delay_seconds: float = 0.0
     retry_times: int = 3
-    price: Dict[str, float] = Field(default_factory=dict)
+    price: dict[str, float] = Field(default_factory=dict)
     effort: str = ""
     thinking: str = ""
 
@@ -282,7 +282,7 @@ class SkillEntry(BaseModel):
     description: str = ""
     body: str = ""
     path: str = ""
-    allowed_tools: List[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
     run_as: str = "subagent"
 
 
@@ -294,7 +294,7 @@ class FeishuConfig(BaseModel):
     domain: str = "feishu"  # feishu (China) | lark (international)
     encrypt_key: str = ""
     verification_token: str = ""
-    allow_from: List[str] = Field(default_factory=list)  # sender open_ids, empty = allow all
+    allow_from: list[str] = Field(default_factory=list)  # sender open_ids, empty = allow all
     group_policy: str = "mention"  # mention (only when @bot) | all
     reply_to_message: bool = True  # quote the user's message when replying
     ask_timeout_seconds: int = 300  # how long an `ask` question waits for a chat reply
@@ -315,11 +315,11 @@ class Config(BaseModel):
 
     default_model: str = ""
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
-    providers: List[ProviderEntry] = Field(default_factory=list)
+    providers: list[ProviderEntry] = Field(default_factory=list)
     agent: AgentConfig = Field(default_factory=AgentConfig)
-    mcp_servers: Dict[str, MCPServerConfig] = Field(default_factory=dict)
+    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
-    skills: List[dict] = Field(default_factory=list)
+    skills: list[dict] = Field(default_factory=list)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     plan_mode_marker: str = ""
     plan_approved_message: str = ""
@@ -401,7 +401,7 @@ class Config(BaseModel):
         return base
 
     @property
-    def skills_data(self) -> List[SkillEntry]:
+    def skills_data(self) -> list[SkillEntry]:
         return getattr(self, "_skills_data", [])
 
     def get_skill(self, name: str) -> Optional[SkillEntry]:
@@ -410,7 +410,7 @@ class Config(BaseModel):
                 return s
         return None
 
-    def enabled_skills(self) -> List[SkillEntry]:
+    def enabled_skills(self) -> list[SkillEntry]:
         return self.skills_data
 
 
@@ -461,7 +461,7 @@ _http_pool: httpx.AsyncClient | None = None
 _HTTP_MAX_CONCURRENCY = 10
 
 
-async def get_http_client() -> "httpx.AsyncClient":
+async def get_http_client() -> httpx.AsyncClient:
     global _http_pool
     if _http_pool is None:
         import httpx
@@ -522,7 +522,7 @@ class SubagentManager:
 
     def __init__(self, *, max_concurrent: int = 4):
         self.max_concurrent = max_concurrent
-        self._running: Dict[str, _SubagentTask] = {}
+        self._running: dict[str, _SubagentTask] = {}
 
     def get_running_count(self) -> int:
         self._prune()
@@ -1140,7 +1140,7 @@ class WebSearchTool(SafeTool):
 class SpawnTool(SafeTool):
     """Tool for the LLM to spawn background subagents."""
 
-    def __init__(self, manager: SubagentManager, profiles: Dict[str, SubagentProfileConfig] = None):
+    def __init__(self, manager: SubagentManager, profiles: dict[str, SubagentProfileConfig] = None):
         self._manager = manager
         self._profiles = profiles or {}
 
@@ -1181,8 +1181,8 @@ class SpawnTool(SafeTool):
 # (Moved to config.yaml)
 
 
-def parse_plan_todos(plan: str) -> List[dict]:
-    todos: List[dict] = []
+def parse_plan_todos(plan: str) -> list[dict]:
+    todos: list[dict] = []
     # Regex explanation:
     # ^\s*                : Allow leading spaces
     # (?:-|\*|\+|\d+\.)   : Match list marker (- or * or + or 1.)
@@ -1253,7 +1253,7 @@ class PermissionManager:
 
 class Registry:
     def __init__(self):
-        self._tools: Dict[str, Tool] = {}
+        self._tools: dict[str, Tool] = {}
 
     def add(self, tool: Tool) -> None:
         self._tools[tool.name()] = tool
@@ -1261,10 +1261,10 @@ class Registry:
     def get(self, name: str) -> Optional[Tool]:
         return self._tools.get(name)
 
-    def list(self) -> List[Tool]:
+    def list(self) -> list[Tool]:
         return list(self._tools.values())
 
-    def schemas(self) -> List[dict]:
+    def schemas(self) -> list[dict]:
         return [t.to_dict() for t in self._tools.values()]
 
     async def execute_gated(self, name: str, ctx: Any, args: dict) -> str:
@@ -1284,7 +1284,7 @@ class Registry:
 ALL_TOOLS = [ReadFileTool, WriteFileTool, EditFileTool, BashTool, GrepTool, GlobTool, LsTool, WebFetchTool, AskTool, TodoWriteTool, WebSearchTool]
 
 
-def should_enable(tool_name: str, enabled_list: List[str]) -> bool:
+def should_enable(tool_name: str, enabled_list: list[str]) -> bool:
     return not enabled_list or tool_name in enabled_list
 
 
@@ -1379,8 +1379,8 @@ class Context:
         self.system_prompt = system_prompt
         self.cfg = cfg
         self.perm_manager = perm_manager
-        self.messages: List[Message] = []
-        self.todos: List[dict] = []
+        self.messages: list[Message] = []
+        self.todos: list[dict] = []
 
     def add_user(self, content: str) -> None:
         self.messages.append(Message(MessageRole.USER, content))
@@ -1417,7 +1417,7 @@ class Context:
             summary = f"[Summary of {len(to_compress)} messages]"
             self.messages = [Message(MessageRole.ASSISTANT, summary)] + keep
 
-    def to_openai(self) -> List[dict]:
+    def to_openai(self) -> list[dict]:
         openai_messages = [{"role": "system", "content": self.system_prompt}]
         for message in self.messages:
             openai_messages.append(message.to_dict())
@@ -1449,7 +1449,7 @@ class Provider:
         self.api_key = os.environ.get(entry.api_key_env, "") or entry.api_key_env
 
     @tracer.start_as_current_span("llm_chat")
-    async def chat(self, messages: List[dict], tools: List[dict], temperature: float = 0.0) -> dict:
+    async def chat(self, messages: list[dict], tools: list[dict], temperature: float = 0.0) -> dict:
         """Send request to LLM using litellm async (supporting OpenAI/Gemini/Anthropic, etc.)."""
         from litellm import acompletion, exceptions
 
@@ -1687,7 +1687,7 @@ class Controller:
         self.context.todos = state.get("todos", [])
         return True
 
-    def list_providers(self) -> List[str]:
+    def list_providers(self) -> list[str]:
         current_name = self.provider.entry.name if self.provider else None
         lines = []
         for i, p in enumerate(self.cfg.providers):
@@ -1912,7 +1912,7 @@ class Controller:
             self._pending_queue = None
         return "\n\n".join(turn_assistant_contents) if turn_assistant_contents else "(max_steps reached)"
 
-    async def _drain_pending_queue(self, limit: int = 5) -> List[dict]:
+    async def _drain_pending_queue(self, limit: int = 5) -> list[dict]:
         """Drain completed subagent results from the pending queue (non-blocking)."""
         if self._pending_queue is None:
             return []
@@ -1981,7 +1981,7 @@ class _CommandSpec(NamedTuple):
 
     usage: str  # e.g. "/model <name/idx>"; the dispatchable names are parsed from it
     description: str
-    surfaces: Tuple[str, ...]
+    surfaces: tuple[str, ...]
     handler: Callable[[Controller, str, str], str]  # (controller, arg, surface) -> text
     chat_usage: str = ""  # optional chat-only wording override
     chat_desc: str = ""
@@ -2073,7 +2073,7 @@ def _cmd_gateway(ctrl: Controller, arg: str, surface: str) -> str:
     return ""
 
 
-_COMMAND_SPECS: List[_CommandSpec] = [
+_COMMAND_SPECS: list[_CommandSpec] = [
     _CommandSpec("/help, ?", "Show this help", (_SURFACE_REPL, _SURFACE_CHAT), _cmd_help),
     _CommandSpec("/new", "Start a new conversation (automatically saves current session)", (_SURFACE_REPL, _SURFACE_CHAT), _cmd_new),
     _CommandSpec("/clear", "Same as /new, clears conversation context", (_SURFACE_REPL,), _cmd_new),
@@ -2094,14 +2094,14 @@ _COMMAND_SPECS: List[_CommandSpec] = [
 ]
 
 # Extra names that are accepted but intentionally left out of the help table.
-_COMMAND_ALIASES: Dict[str, str] = {"gateway": "/gateway"}
+_COMMAND_ALIASES: dict[str, str] = {"gateway": "/gateway"}
 
 _HELP_COLUMN = 18
 
 
 def _render_command_table(surface: str, min_width: int = _HELP_COLUMN) -> str:
     """Render aligned `usage  description` lines for one surface."""
-    rows: List[Tuple[str, str]] = []
+    rows: list[tuple[str, str]] = []
     for spec in _COMMAND_SPECS:
         if surface not in spec.surfaces:
             continue
@@ -2113,9 +2113,9 @@ def _render_command_table(surface: str, min_width: int = _HELP_COLUMN) -> str:
     return "\n".join(f"  {u:<{width}}{d}" for u, d in rows)
 
 
-def _command_names(usage: str) -> List[str]:
+def _command_names(usage: str) -> list[str]:
     """Dispatchable names of a catalogue row: "/help, ?" -> ["/help", "?"]."""
-    names: List[str] = []
+    names: list[str] = []
     for token in usage.split():
         token = token.rstrip(",")
         if not token or token.startswith("<") or "/" in token[1:]:
@@ -2125,9 +2125,9 @@ def _command_names(usage: str) -> List[str]:
     return names
 
 
-def _surface_commands(surface: str) -> Dict[str, _CommandSpec]:
+def _surface_commands(surface: str) -> dict[str, _CommandSpec]:
     """name -> spec for one surface, derived from the same catalogue the help renders."""
-    commands: Dict[str, "_CommandSpec"] = {}
+    commands: dict[str, _CommandSpec] = {}
     for spec in _COMMAND_SPECS:
         if surface not in spec.surfaces:
             continue
@@ -2139,7 +2139,7 @@ def _surface_commands(surface: str) -> Dict[str, _CommandSpec]:
     return commands
 
 
-def lookup_command(req: str, surface: str) -> Optional[Tuple[_CommandSpec, str]]:
+def lookup_command(req: str, surface: str) -> Optional[tuple[_CommandSpec, str]]:
     commands = _surface_commands(surface)
     head = req.split(None, 1)[0] if req.split() else ""
     for key in (req, head):
@@ -2241,9 +2241,9 @@ class FeishuGateway:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._bot_open_id: str = ""
         self._sem: Optional[asyncio.Semaphore] = None
-        self._chats: "OrderedDict[str, Controller]" = OrderedDict()
-        self._locks: Dict[str, asyncio.Lock] = {}
-        self._pending_asks: Dict[str, asyncio.Future] = {}
+        self._chats: OrderedDict[str, Controller] = OrderedDict()
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._pending_asks: dict[str, asyncio.Future] = {}
         self._seen: deque = deque()
         self._seen_set: set = set()
 
@@ -2464,7 +2464,7 @@ class FeishuGateway:
         spec, _name = found
         return spec.handler(controller, _command_arg(req), _SURFACE_CHAT)
 
-    async def ask(self, controller: Controller, question: str, options: List[str]) -> str:
+    async def ask(self, controller: Controller, question: str, options: list[str]) -> str:
         """Post the question into the chat and suspend the turn until the user answers."""
         chat_id = getattr(controller, "chat_id", "") or getattr(getattr(controller, "context", None), "chat_id", "")
         if not chat_id:
@@ -2482,7 +2482,7 @@ class FeishuGateway:
         return self._match_option(answer, options)
 
     @staticmethod
-    def _match_option(answer: str, options: List[str]) -> str:
+    def _match_option(answer: str, options: list[str]) -> str:
         """Turn "2" (or the option text) into the chosen option; anything else is a free answer."""
         text = (answer or "").strip()
         if text.isdigit() and 1 <= int(text) <= len(options):
@@ -2549,9 +2549,9 @@ class FeishuGateway:
             logger.error(f"Feishu send error: {e}")
 
     @classmethod
-    def _chunks(cls, text: str) -> List[str]:
+    def _chunks(cls, text: str) -> list[str]:
         text = (text or "").strip()
-        chunks: List[str] = []
+        chunks: list[str] = []
         while len(text) > cls.CHUNK_LIMIT:
             cut = text.rfind("\n", 0, cls.CHUNK_LIMIT)
             if cut <= 0:

@@ -273,6 +273,7 @@ class ProviderEntry(BaseModel):
     price: dict[str, float] = Field(default_factory=dict)
     effort: str = ""
     thinking: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
 
 
 class SkillEntry(BaseModel):
@@ -1160,6 +1161,18 @@ class SpawnTool(SafeTool):
 # (Moved to config.yaml)
 
 
+_PLAN_BLOCK_RE = re.compile(r"<plan>\s*(.*?)\s*</plan>", re.IGNORECASE | re.DOTALL)
+
+
+def extract_plan(text: str) -> str | None:
+    """Return the plan body only when the model explicitly wraps it in <plan> tags."""
+    match = _PLAN_BLOCK_RE.search(text)
+    if not match:
+        return None
+    body = match.group(1).strip()
+    return body or None
+
+
 def parse_plan_todos(plan: str) -> list[dict]:
     todos: list[dict] = []
     # Regex explanation:
@@ -1426,6 +1439,8 @@ class Provider:
     def __init__(self, entry: ProviderEntry):
         self.entry = entry
         self.api_key = os.environ.get(entry.api_key_env, "") or entry.api_key_env
+        self.session_id = uuid.uuid4().hex
+        self.extra_headers = {k: v.replace("{session_id}", self.session_id) for k, v in entry.headers.items()}
 
     @tracer.start_as_current_span("llm_chat")
     async def chat(self, messages: list[dict], tools: list[dict], temperature: float = 0.0) -> dict:
@@ -1448,6 +1463,8 @@ class Provider:
             kwargs["tool_choice"] = "auto"
         if self.entry.base_url:
             kwargs["api_base"] = self.entry.base_url
+        if self.extra_headers:
+            kwargs["extra_headers"] = self.extra_headers
 
         try:
             response = await acompletion(**kwargs)
@@ -1739,13 +1756,17 @@ class Controller:
             return self.cfg.plan_mode_marker + "\n\n" + text
         return text
 
-    def _request_plan_approval(self, proposal: str) -> bool:
+    async def _request_plan_approval(self, proposal: str) -> bool:
         _stdout("\n" + "\u2550" * 60)
         _stdout("\U0001f4cb  PLAN MODE \u2014 proposed plan:")
         _stdout("\u2550" * 60)
         _stdout(proposal)
         _stdout("\u2550" * 60)
-        return True
+        ask_tool = self.registry.get("ask")
+        if not ask_tool:
+            return False
+        answer = await ask_tool.execute(self, {"question": "Approve this plan and start execution?", "options": ["Approve", "Reject"]})
+        return (answer or "").strip().lower() in {"approve", "yes", "y", "1"}
 
     @tracer.start_as_current_span("run_turn")
     async def _run_turn(self, composed_input: str) -> str:
@@ -1920,7 +1941,12 @@ class Controller:
         if not proposal or not proposal.strip():
             return "(plan mode: no proposal generated)"
 
-        approved = self._request_plan_approval(proposal)
+        # Only an explicit <plan> block is a plan; anything else is a direct answer.
+        plan = extract_plan(proposal)
+        if plan is None:
+            return proposal
+
+        approved = await self._request_plan_approval(plan)
         if not approved:
             return "Plan rejected. Plan mode is still active. Send revised instructions."
 
@@ -1935,7 +1961,7 @@ class Controller:
 
         self.set_plan_mode(False)
 
-        todos = parse_plan_todos(proposal)
+        todos = parse_plan_todos(plan)
         if todos and self.context is not None:
             self.context.todos = todos
             todo_log = "\n".join(f"  [{t['status']}] {t['content']}" for t in todos)

@@ -87,6 +87,21 @@ providers:
     retry_time: 5
     delay: 2
 
+  # OpenCode Go subscription (OpenAI-compatible)
+  - name: opencode-go
+    kind: openai
+    base_url: https://opencode.ai/zen/go/v1
+    model: deepseek-v4.1-flash
+    api_key_env: OPENCODE_GO_API_KEY
+    context_window: 1000000
+    request_timeout: 60
+    retry_times: 3
+    delay_seconds: 0.3
+    headers:
+      x-opencode-session: "{session_id}"
+      User-Agent: pyMicroHarness/1.0
+    default: true
+
   # DeepSeek V4.1 Flash (canonical id: deepseek-flash; legacy alias deepseek-v4.1-flash-expires-on-0910)
   - name: deepseek
     kind: openai
@@ -97,7 +112,6 @@ providers:
     request_timeout: 120
     retry_time: 3
     delay: 0.3
-    default: true
 
 
 mcp_servers:
@@ -318,6 +332,9 @@ plan_mode_marker: |
   list: each PHASE is a top-level numbered list item (e.g. "1. Add the config 
   loader"), and each phase’s sub-steps are bullets indented beneath it 
   (e.g. "   - parse the TOML into Config"). Keep phases few (2–6). 
+  Wrap the plan exactly in <plan> and </plan> tags. If the request is a direct
+  question or needs no code changes, answer normally WITHOUT a <plan> block —
+  that is treated as your final answer and nothing is executed.
   The user will be asked to approve before any changes are made.]
 
 plan_approved_message: |

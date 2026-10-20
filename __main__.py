@@ -787,24 +787,6 @@ class ReflectionShellTool(SafeTool):
         except subprocess.CalledProcessError as e:
             return f"Error executing {self.config.name}: {e.output}"
 
-        return "Apply multiple edits to a file atomically."
-
-    def schema(self):
-        return {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["old_text", "new_text"]}}}, "required": ["path", "edits"]}
-
-    def read_only(self):
-        return False
-
-    async def __call__(self, ctx, args):
-        edit_tool = EditFileTool()
-        results = []
-        for edit in args["edits"]:
-            res = await edit_tool(ctx, {"path": args["path"], "old_text": edit["old_text"], "new_text": edit["new_text"]})
-            results.append(res)
-            if res.startswith("Error"):
-                return f"Multi-edit failed: {res}"
-        return f"Applied {len(args['edits'])} edits to {args['path']}"
-
 
 class BashTool(SafeTool):
     def __init__(self, path="", timeout=120):

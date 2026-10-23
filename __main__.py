@@ -2751,8 +2751,18 @@ def main(argv=None) -> None:
                         break
 
             if not handled:
-                _stdout(f"Unknown command: '{req}'.\nNote: Any input starting with '/' is interpreted as a system command. Please check your spelling or use a valid command.")
-                continue
+                skill_name, *skill_args = req[1:].split() or [""]
+                skill = ctrl.cfg.get_skill(skill_name) if skill_name else None
+                if skill:
+                    _stdout(f"Triggering skill: {skill_name} with args: {skill_args}")
+                    ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill directory: {skill.path}\n\nSkill definition:\n{skill.body}")
+                    _stdout("")
+                    rich_print(asyncio.run(_run_and_cleanup(ctrl, "Proceed with this skill execution")))
+                    _stdout("")
+                    handled = True
+                else:
+                    _stdout(f"Unknown command: '{req}'.\nNote: Any input starting with '/' is interpreted as a system command. Please check your spelling or use a valid command.")
+                    continue
         elif req in COMMANDS:
             try:
                 COMMANDS[req](req)
@@ -2768,15 +2778,6 @@ def main(argv=None) -> None:
                         stop = True
                     handled = True
                     break
-            if not handled and req.startswith("/") and ctrl.cfg.get_skill(req[1:].split()[0]):
-                skill_name, *skill_args = req[1:].split()
-                skill = ctrl.cfg.get_skill(skill_name)
-                _stdout(f"Triggering skill: {skill_name} with args: {skill_args}")
-                ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill directory: {skill.path}\n\nSkill definition:\n{skill.body}")
-                _stdout("")
-                rich_print(asyncio.run(_run_and_cleanup(ctrl, "Proceed with this skill execution")))
-                _stdout("")
-                handled = True
         if stop:
             break
 

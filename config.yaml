@@ -100,6 +100,9 @@ providers:
     headers:
       x-opencode-session: "{session_id}"
       User-Agent: pyMicroHarness/1.0
+    extra_body:
+      thinking:
+        type: disabled
     default: true
 
   # DeepSeek V4.1 Flash (canonical id: deepseek-flash; legacy alias deepseek-v4.1-flash-expires-on-0910)

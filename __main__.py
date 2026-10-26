@@ -54,9 +54,20 @@ from enum import Enum
 from pathlib import Path
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+_t_litellm_import = time.perf_counter()
+from litellm import acompletion, exceptions
+
+logger.info(f"litellm import took {time.perf_counter() - _t_litellm_import:.2f}s")
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 console = Console()
 
@@ -1462,8 +1473,6 @@ class Provider:
     @tracer.start_as_current_span("llm_chat")
     async def chat(self, messages: list[dict], tools: list[dict], temperature: float = 0.0) -> dict:
         """Send request to LLM using litellm async (supporting OpenAI/Gemini/Anthropic, etc.)."""
-        from litellm import acompletion, exceptions
-
         # Apply delay if configured
         if self.entry.delay_seconds > 0:
             logger.info(f"Delaying {self.entry.delay_seconds}s before request...")
@@ -1545,6 +1554,7 @@ class _MCPRemoteTool(SafeTool):
     @classmethod
     async def discover_all(cls, server_name: str, url: str) -> list:
         """Connect to the MCP server, discover every tool and return the _MCPRemoteTool instances."""
+        _start = time.perf_counter()
         tools = []
         try:
             from mcp import ClientSession
@@ -1563,9 +1573,9 @@ class _MCPRemoteTool(SafeTool):
                                 tool_schema=t.inputSchema or {"type": "object", "properties": {}},
                             )
                         )
-            logger.info(f"MCP '{server_name}' → {len(tools)} tools: {[t._tool_name for t in tools]}")
+            logger.info(f"MCP '{server_name}' → {len(tools)} tools in {time.perf_counter() - _start:.2f}s: {[t._tool_name for t in tools]}")
         except Exception as e:  # noqa
-            logger.warning(f"MCP Discovery failed for '{server_name}' ({url}): {e}")
+            logger.warning(f"MCP Discovery failed for '{server_name}' ({url}) after {time.perf_counter() - _start:.2f}s: {e}")
         return tools
 
     def name(self) -> str:

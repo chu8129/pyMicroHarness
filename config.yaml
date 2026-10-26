@@ -372,7 +372,7 @@ tools:
   enabled: []
   shell:
     path: ""                           # Custom shell path
-  bash_timeout_seconds: 120            # Bash command timeout (s)
+  bash_timeout_seconds: 60            # Bash command timeout (s)
   reflection_tools:
     - name: shell_read_file
       description: Read a file's contents using Linux tools (sed | head -c max_chars).

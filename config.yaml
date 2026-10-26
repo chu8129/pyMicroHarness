@@ -41,6 +41,7 @@ providers:
 
   - name: gemini
     kind: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     model: gemini/gemini-3-flash-preview
     model: gemini/gemini-3.1-flash-lite
     api_key_env: GEMINI_API_KEY
@@ -51,6 +52,7 @@ providers:
 
   - name: gemini-3.5-flash
     kind: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     model: gemini-3.5-flash
     api_key_env: GEMINI_API_KEY
     context_window: 65536
@@ -60,6 +62,7 @@ providers:
 
 
   - name: gemini2
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     model: gemini/gemini-3.1-flash-lite
     api_key_env: GEMINI_API_KEY2
     context_window: 65536

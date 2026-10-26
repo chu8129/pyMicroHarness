@@ -27,8 +27,6 @@ from __future__ import annotations
 import os
 import socket
 
-os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
-os.environ["LITELLM_DISABLE_PRICING"] = "True"
 import ipaddress
 import sys
 import json
@@ -55,10 +53,10 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-_t_litellm_import = time.perf_counter()
-from litellm import acompletion, exceptions
+_t_openai_import = time.perf_counter()
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI, AuthenticationError, RateLimitError
 
-logger.info(f"litellm import took {time.perf_counter() - _t_litellm_import:.2f}s")
+logger.info(f"openai import took {time.perf_counter() - _t_openai_import:.2f}s")
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -1469,45 +1467,54 @@ class Provider:
         self.api_key = os.environ.get(entry.api_key_env, "") or entry.api_key_env
         self.session_id = uuid.uuid4().hex
         self.extra_headers = {k: v.replace("{session_id}", self.session_id) for k, v in entry.headers.items()}
+        self.client = AsyncOpenAI(
+            api_key=self.api_key or "",
+            base_url=entry.base_url or None,
+            timeout=entry.request_timeout,
+            default_headers=self.extra_headers or None,
+            max_retries=entry.retry_times,
+        )
+
+    @staticmethod
+    def _api_model(name: str) -> str:
+        prefix, sep, rest = name.partition("/")
+        return rest if sep and prefix in ("openai", "gemini", "anthropic") else name
 
     @tracer.start_as_current_span("llm_chat")
     async def chat(self, messages: list[dict], tools: list[dict], temperature: float = 0.0) -> dict:
-        """Send request to LLM using litellm async (supporting OpenAI/Gemini/Anthropic, etc.)."""
+        """Send request to an OpenAI-compatible endpoint using the OpenAI async client."""
         # Apply delay if configured
         if self.entry.delay_seconds > 0:
             logger.info(f"Delaying {self.entry.delay_seconds}s before request...")
             await asyncio.sleep(self.entry.delay_seconds)
 
-        model = self.entry.model
-        kind = self.entry.kind
-        if self.entry.base_url and kind and not model.startswith(f"{kind}/"):
-            model = f"{kind}/{model}"
-
-        kwargs = {"model": model, "messages": messages, "temperature": temperature, "timeout": self.entry.request_timeout, "api_key": self.api_key}
+        kwargs = {"model": self._api_model(self.entry.model), "messages": messages, "temperature": temperature}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        if self.entry.base_url:
-            kwargs["api_base"] = self.entry.base_url
-        if self.extra_headers:
-            kwargs["extra_headers"] = self.extra_headers
         if self.entry.extra_body:
             kwargs["extra_body"] = self.entry.extra_body
 
         try:
-            response = await acompletion(**kwargs)
+            response = await self.client.chat.completions.create(**kwargs)
         except KeyboardInterrupt:
             logger.warning("LLM call interrupted by user. Resuming...")
             return {"content": "(Interrupted by user)", "tool_calls": [], "finish_reason": "interrupted"}
-        except exceptions.RateLimitError as e:
+        except RateLimitError as e:
             logger.error(f"Rate limit exceeded: {e}")
             return {"content": "Error: API Rate Limit Exceeded. Please wait a moment and try again.", "tool_calls": [], "finish_reason": "error", "error": str(e)}
-        except exceptions.AuthenticationError as e:
+        except AuthenticationError as e:
             logger.error(f"Authentication failed: {e}")
             return {"content": "Error: Authentication failed. Check your API key.", "tool_calls": [], "finish_reason": "error", "error": str(e)}
-        except exceptions.ServiceUnavailableError as e:
-            logger.error(f"Service Unavailable: {e}")
-            return {"content": "Error: Service is currently unavailable (e.g. high load). Please try again in a few moments.", "tool_calls": [], "finish_reason": "error", "error": str(e)}
+        except APIConnectionError as e:
+            logger.error(f"Connection failed: {e}")
+            return {"content": "Error: Failed to connect to the model endpoint (timeout or network). Please try again.", "tool_calls": [], "finish_reason": "error", "error": str(e)}
+        except APIStatusError as e:
+            if e.status_code >= 500:
+                logger.error(f"Service Unavailable: {e}")
+                return {"content": "Error: Service is currently unavailable (e.g. high load). Please try again in a few moments.", "tool_calls": [], "finish_reason": "error", "error": str(e)}
+            logger.error(f"LLM call error: {e}")
+            return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error", "error": str(e)}
         except Exception as e:
             logger.error(f"LLM call error: {e}")
             return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error", "error": str(e)}
@@ -1523,10 +1530,11 @@ class Provider:
         if usage:
             usage_data = {"input": usage.prompt_tokens, "output": usage.completion_tokens}
             cache_tokens = 0
-            if hasattr(usage, "extra") and usage.extra is not None and "cache_hit_tokens" in usage.extra:
-                cache_tokens = usage.extra["cache_hit_tokens"]
-            elif hasattr(usage, "cache_read_input_tokens") and usage.cache_read_input_tokens:
-                cache_tokens = usage.cache_read_input_tokens
+            details = getattr(usage, "prompt_tokens_details", None)
+            if details is not None:
+                cache_tokens = getattr(details, "cached_tokens", 0) or 0
+            if not cache_tokens:
+                cache_tokens = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
 
             usage_data["cache_rate"] = f"{(cache_tokens / usage.prompt_tokens * 100) if usage.prompt_tokens > 0 else 0:.1f}%"
 
